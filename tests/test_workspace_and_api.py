@@ -116,6 +116,21 @@ def test_api_rejects_non_pdf_upload(client):
     assert res.status_code == 400
 
 
+def test_api_serves_the_built_front_end(client):
+    """`pdfplay serve` must work straight from a pip install — no node step."""
+    from pdfplay.server.app import STATIC
+
+    res = client.get("/")
+    assert res.status_code == 200
+    if (STATIC / "index.html").exists():
+        assert 'id="root"' in res.text
+        asset = next((STATIC / "assets").glob("*.js"), None)
+        assert asset is not None, "built JS bundle missing"
+        assert client.get(f"/assets/{asset.name}").status_code == 200
+    else:  # front-end not built in this checkout
+        assert "npm run build" in res.text
+
+
 def test_api_reports_unknown_document(client):
     assert client.get("/api/documents/deadbeef").status_code == 404
 

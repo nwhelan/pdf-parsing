@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from .. import registry
 from ..metrics import DOC_CLASSES, bank_statement, generic
@@ -21,19 +22,21 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
     ws = workspace or Workspace()
     app = FastAPI(title="pdfplay", version="0.1.0")
 
-    # -- static ----------------------------------------------------------
+    # -- static (built React app) ----------------------------------------
+
+    if (STATIC / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return (STATIC / "index.html").read_text()
-
-    @app.get("/app.js")
-    def app_js() -> FileResponse:
-        return FileResponse(STATIC / "app.js", media_type="application/javascript")
-
-    @app.get("/styles.css")
-    def styles() -> FileResponse:
-        return FileResponse(STATIC / "styles.css", media_type="text/css")
+        page = STATIC / "index.html"
+        if not page.exists():
+            return (
+                "<h1>pdfplay</h1><p>The front-end has not been built yet. Run:</p>"
+                "<pre>cd web &amp;&amp; npm ci &amp;&amp; npm run build</pre>"
+                "<p>The JSON API is up regardless — see <a href='/docs'>/docs</a>.</p>"
+            )
+        return page.read_text()
 
     @app.get("/favicon.ico")
     def favicon() -> Response:

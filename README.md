@@ -131,13 +131,44 @@ should not).
 
 ## The viewer
 
-`pdfplay serve` opens a three-pane UI:
+`pdfplay serve` opens a React app built with [shadcn/ui](https://ui.shadcn.com)
+components on Tailwind v4:
 
-- **Left** — documents, parsers with availability and per-parser options.
-- **Middle** — the rendered page with box overlays. Toggle layers, switch
-  parsers, hover a box to see its text, click to select it in the text pane.
-  Compare mode puts two parsers side by side on the same page.
-- **Right** — extracted text / Markdown / tables / JSON, plus the scores.
+- **Left** — a collapsible `Sidebar` listing parsers grouped local/remote, each
+  with a checkbox to run it and a tooltip explaining what it does (or why it
+  isn't available). Selecting one opens its options below, rendered from the
+  adapter's own `Option` declarations — `Switch` for booleans, `Select` for
+  choices, `Input` for numbers. Nothing about the UI is parser-specific.
+- **Middle** — the rendered page inside `Resizable` panels, with each parser's
+  boxes drawn on top. A `ToggleGroup` switches granularity layers
+  (word/line/block/region/table/cell), hovering a box shows its text in a
+  `Tooltip`, and clicking selects it in the text pane. Compare mode splits the
+  pane so two parsers sit side by side on the same page; fit mode scales each
+  pane independently so both stay legible.
+- **Right** — `Tabs` over scores, text, Markdown, tables, diff, and raw JSON.
+  Scores render as `Card` sections: generic signals in a `Table`, per-parser
+  reconciliation as a `Progress` bar, ground-truth P/R/F1, and the text
+  agreement matrix. Run results and failures arrive as toasts.
+
+Dark and light themes both ship; the toggle is in the header.
+
+### Working on the front-end
+
+The build output is committed under `src/pdfplay/server/static`, so
+`pip install` + `pdfplay serve` works with no node step. To change the UI:
+
+```bash
+cd web
+npm ci
+npm run dev        # vite on :5173, proxying /api to pdfplay serve on :8000
+npm run build      # writes back into src/pdfplay/server/static
+```
+
+The components live in `web/src/components/ui` and are yours to edit — that is
+shadcn's model, not a limitation. Note that this session could not reach
+`ui.shadcn.com` (egress policy), so the components were written into the
+project directly rather than pulled with `npx shadcn add`; `components.json` is
+present so the CLI works normally wherever the registry is reachable.
 
 ## CLI
 

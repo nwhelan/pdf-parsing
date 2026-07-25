@@ -220,3 +220,7 @@ __marimo__/
 # pdfplay workspace and generated samples
 /workspace/
 /samples/
+
+# front-end build inputs (the built output under src/pdfplay/server/static is committed)
+web/node_modules/
+web/dist/

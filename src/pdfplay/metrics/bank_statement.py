@@ -47,6 +47,27 @@ _NOISE_LINE = re.compile(
     r"^(page\s+\d+|statement\s+period|account\s+(number|summary)|continued|beginning|ending)\b", re.I
 )
 
+# Markdown table plumbing, for parsers that emit GFM tables rather than lines.
+_MD_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+_MD_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def flatten_row(text: str) -> str:
+    """Reduce a Markdown table row to plain text, leaving other lines alone.
+
+    A parser that reconstructs the statement as a real table writes
+    ``|03/02/2025|CHECK 1042|31.61||6,492.77|``. That is *better* output than a
+    flat line, and it must not be penalized just for carrying its column
+    structure in pipes — so cells are unwrapped before the row heuristics run.
+    """
+    if not _MD_ROW.match(text):
+        return text
+    if _MD_RULE.match(text):
+        return ""
+    inner = _MD_ROW.match(text).group(1)
+    cells = [cell.replace("<br>", " ").strip() for cell in inner.split("|")]
+    return " ".join(cell for cell in cells if cell)
+
 
 @dataclass
 class MoneyToken:
@@ -140,7 +161,7 @@ def extract_transactions(result: ParseResult) -> list[Transaction]:
     for page in result.pages:
         for line in reconstruct_lines(page):
             index += 1
-            text = normalize_text(line.text)
+            text = normalize_text(flatten_row(line.text))
             if not text or _NOISE_LINE.match(text):
                 continue
             date_match = _match_date(text)

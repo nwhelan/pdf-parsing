@@ -68,6 +68,17 @@ export function PageViewer({
   }, [geometry.width])
 
   const scale = fit ? fitZoom : zoom
+  // A parser may not emit the layer that is currently selected — the layout
+  // model only produces `region`, OCR only `word`/`line`. Fall back to the
+  // finest layer it does have, rather than showing an empty overlay.
+  React.useEffect(() => {
+    if (!availableLayers.length || availableLayers.some((l) => layers.includes(l))) return
+    const preferred = (["line", "region", "word", "block", "table"] as const).find((l) =>
+      availableLayers.includes(l)
+    )
+    if (preferred) onLayersChange([preferred])
+  }, [availableLayers, layers, onLayersChange])
+
   const boxes = (pageResult?.blocks ?? []).filter((b) => b.bbox && layers.includes(b.layer))
 
   return (

@@ -105,6 +105,28 @@ def test_ledger_scoring_reports_a_dropped_row():
     assert score["missed"][0]["description"] == "BOOKS"
 
 
+def test_markdown_table_rows_are_read_as_transactions():
+    """A parser that emits a real Markdown table must not be penalized for it."""
+    result = _result_from_lines(
+        [
+            "|Date|Description|Withdrawals|Deposits|Balance|",
+            "|---|---|---|---|---|",
+            "|03/01/2025|OPENING PURCHASE|100.00||900.00|",
+            "|03/02/2025|COFFEE<br>SHOP|10.00||890.00|",
+            "|03/03/2025|PAYCHECK||500.00|1,390.00|",
+        ]
+    )
+    report = bank_statement.analyze(result)
+    assert report.n_transactions == 3
+    assert report.reconciliation_rate == 1.0
+    assert report.transactions[1]["description"] == "COFFEE SHOP"
+
+
+def test_flatten_row_leaves_plain_lines_untouched():
+    assert bank_statement.flatten_row("03/01/2025 COFFEE 10.00 890.00") == "03/01/2025 COFFEE 10.00 890.00"
+    assert bank_statement.flatten_row("|---|---|") == ""
+
+
 def test_character_error_rate_is_zero_for_whitespace_differences():
     assert generic.character_error_rate("hello  world", "hello world") == 0.0
     assert generic.character_error_rate("hello world", "hella world") > 0.0

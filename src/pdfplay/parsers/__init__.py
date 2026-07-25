@@ -15,6 +15,7 @@ from .gemini_parser import GeminiVisionParser
 from .openai_parser import OpenAIVisionParser
 from .pdfminer_parser import PdfminerParser
 from .pdfplumber_parser import PdfplumberParser
+from .pymupdf_layout_parser import PyMuPDFLayoutParser
 from .pymupdf_parser import PyMuPDFParser
 from .pypdfium2_parser import Pypdfium2Parser
 from .tesseract_parser import TesseractParser
@@ -22,6 +23,7 @@ from .unstructured_parser import UnstructuredParser
 
 for _cls in (
     PyMuPDFParser,
+    PyMuPDFLayoutParser,
     PdfplumberParser,
     Pypdfium2Parser,
     PdfminerParser,

@@ -37,6 +37,7 @@ away.
 | Parser | Kind | Notes |
 |---|---|---|
 | `pymupdf` | local | MuPDF text layer, word/line/block boxes, geometric table finder. Fastest. |
+| `pymupdf-layout` | local (extra) | `pymupdf4llm.to_markdown` with the pymupdf-layout ONNX model: classified regions, real Markdown tables, and an OCR fallback. Switch `engine=classic` for the same call without the model. |
 | `pdfplumber` | local | pdfminer + word clustering. Its `text` table strategy handles **borderless** tables. |
 | `pypdfium2` | local | Chrome's PDF engine. Text rects only — a good "what's really in the text layer" baseline. |
 | `pdfminer` | local | Tunable `LAParams`; shows how sensitive paragraph grouping is on a document class. |
@@ -50,7 +51,7 @@ away.
 Install the optional ones as needed:
 
 ```bash
-uv pip install -e '.[docling]'      # also: unstructured, ocr, anthropic, openai, gemini, vision
+uv pip install -e '.[layout]'       # also: docling, unstructured, ocr, anthropic, openai, gemini, vision
 ```
 
 Remote parsers read their credentials from the environment
@@ -95,6 +96,11 @@ suspicious characters, run-on tokens, time per page, and token cost. Plus a
 cross-parser text similarity matrix — when four parsers agree and one doesn't,
 that's usually the story.
 
+Row extraction is format-agnostic on purpose: a parser that reconstructs the
+ledger as a Markdown table (`|03/02/2025|CHECK 1042|31.61||6,492.77|`) is
+producing *better* output than a flat line, so pipes are unwrapped before the
+row heuristics run rather than counting against it.
+
 **Bank statements** (`pdfplay.metrics.bank_statement`) get a domain scorer that
 exploits a property of the document class: a statement checks itself. Each row
 carries a running balance, so `balance[i] - balance[i-1]` must equal the signed
@@ -128,6 +134,20 @@ differently: `ruled` (table with ruling lines), `borderless` (alignment only —
 the common real case), and `scanned` (rasterized and slightly skewed, no text
 layer at all, so every text-layer parser should score ~zero and OCR/vision
 should not).
+
+On the bundled samples that separation looks like this — every text-layer
+parser reads the clean statement perfectly, and the scan is where the field
+splits:
+
+```
+scanned          txns  recon   F1     s/pg
+pymupdf             0   0.00   0.00   0.07     text layer is empty
+pdfplumber          0   0.00   0.00   0.10
+pdfminer            0   0.00   0.00   0.10
+pypdfium2           0   0.00   0.00   0.09
+tesseract          34   1.00   1.00   1.52     OCR
+pymupdf-layout     34   1.00   1.00   2.75     layout model + OCR fallback
+```
 
 ## The viewer
 

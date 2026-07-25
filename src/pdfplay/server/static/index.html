@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pdfplay</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header>
+  <h1>pdfplay</h1>
+  <div class="doc-picker">
+    <select id="doc-select"></select>
+    <label class="upload">
+      <input type="file" id="upload" accept="application/pdf" hidden />
+      + PDF
+    </label>
+  </div>
+  <div class="pager">
+    <button id="prev-page">&larr;</button>
+    <span id="page-label">–</span>
+    <button id="next-page">&rarr;</button>
+  </div>
+  <div class="spacer"></div>
+  <label class="toggle"><input type="checkbox" id="compare-mode" /> compare</label>
+  <label class="toggle"><input type="checkbox" id="show-labels" /> labels</label>
+  <label class="zoom">zoom <input type="range" id="zoom" min="0.5" max="3" step="0.25" value="1.5" /></label>
+  <span id="status" class="status"></span>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <h2>Parsers</h2>
+    <div id="parser-list"></div>
+    <button id="run-selected" class="primary">Run selected</button>
+    <label class="toggle small"><input type="checkbox" id="force-rerun" /> ignore cache</label>
+    <h2>Options</h2>
+    <div id="options-panel" class="muted">Select a parser to configure it.</div>
+  </aside>
+
+  <section id="viewer">
+    <div class="pane" id="pane-a">
+      <div class="pane-head">
+        <select class="result-select" data-pane="a"></select>
+        <span class="layers" data-pane="a"></span>
+      </div>
+      <div class="canvas-wrap"><div class="canvas" data-pane="a"></div></div>
+    </div>
+    <div class="pane hidden" id="pane-b">
+      <div class="pane-head">
+        <select class="result-select" data-pane="b"></select>
+        <span class="layers" data-pane="b"></span>
+      </div>
+      <div class="canvas-wrap"><div class="canvas" data-pane="b"></div></div>
+    </div>
+  </section>
+
+  <aside id="inspector">
+    <nav class="tabs">
+      <button data-tab="scores" class="active">Scores</button>
+      <button data-tab="text">Text</button>
+      <button data-tab="markdown">Markdown</button>
+      <button data-tab="tables">Tables</button>
+      <button data-tab="diff">Diff</button>
+      <button data-tab="json">JSON</button>
+    </nav>
+    <div class="tab-body" id="tab-scores"></div>
+    <div class="tab-body hidden" id="tab-text"></div>
+    <div class="tab-body hidden" id="tab-markdown"></div>
+    <div class="tab-body hidden" id="tab-tables"></div>
+    <div class="tab-body hidden" id="tab-diff"></div>
+    <div class="tab-body hidden" id="tab-json"></div>
+  </aside>
+</main>
+
+<div id="tooltip" class="tooltip hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

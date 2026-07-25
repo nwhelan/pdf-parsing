@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# pdfplay workspace and generated samples
+/workspace/
+/samples/

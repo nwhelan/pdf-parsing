@@ -98,7 +98,11 @@ export function ParserSidebar({
                 </Tooltip>
               </div>
               {resultCounts[parser.id] ? (
-                <SidebarMenuBadge className="right-2">{resultCounts[parser.id]}</SidebarMenuBadge>
+                <SidebarMenuBadge
+                  // Normally positioned by a peer selector on the menu button; the
+                  // checkbox wrapper below breaks that sibling chain, so set it here.
+                  className="top-1.5 right-2"
+                >{resultCounts[parser.id]}</SidebarMenuBadge>
               ) : null}
             </SidebarMenuItem>
           ))}

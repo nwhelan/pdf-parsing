@@ -47,17 +47,67 @@ away.
 | `claude` | remote (extra) | Page image → structured JSON transcription, via Anthropic structured outputs. |
 | `openai` | remote (extra) | Same contract via Chat Completions `json_schema`. |
 | `gemini` | remote (extra) | Same contract, using Gemini's native `[ymin,xmin,ymax,xmax]` box convention. |
+| `mistral-ocr-3` | remote (extra) | Document-level OCR API: Markdown per page including tables. Endpoint is pluggable — Mistral, Azure AI Foundry, or a gateway. |
+| `mistral-ocr-4` | remote (extra) | The same adapter on the newer model, registered separately so the two versions can run side by side. |
 
 Install the optional ones as needed:
 
 ```bash
-uv pip install -e '.[layout]'       # also: docling, unstructured, ocr, anthropic, openai, gemini, vision
+uv pip install -e '.[layout]'       # also: docling, unstructured, ocr, anthropic, openai, gemini, mistral, vision
 ```
 
 Remote parsers read their credentials from the environment
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) and report themselves
-as unavailable — with the reason — when a key is missing. Nothing is ever sent
-anywhere unless you explicitly run a remote parser.
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`) and
+report themselves as unavailable — with the reason — when a key is missing.
+Nothing is ever sent anywhere unless you explicitly run a remote parser.
+
+### Mistral OCR, and pointing parsers at different endpoints
+
+Mistral OCR is document-level rather than page-image-level: you post the whole
+PDF and get Markdown back per page, plus boxes for any *images* it found. It
+returns no geometry for text, so the overlay shows figures only — the comparison
+value is in the Markdown, the recovered tables, and whether the ledger
+reconciles. Markdown tables are parsed back into the normalized `Table` model
+(the same code path `pymupdf-layout` uses), so its tables are comparable with
+parsers that expose real cell geometry.
+
+The same model is served from several places, each with its own URL shape and
+auth header, so the endpoint is an option rather than a constant:
+
+| Option | Effect |
+|---|---|
+| `endpoint` | `mistral` (default), `azure`, or `custom`. Picks the default URL and auth scheme. |
+| `base_url` | Full URL of the OCR endpoint. Overrides everything else. |
+| `api_key_env` | Name of the env var holding the key. Blank tries `MISTRAL_API_KEY`, `AZURE_MISTRAL_API_KEY`, `MISTRAL_OCR_API_KEY`. |
+| `auth_header` | `auto` sends `Authorization: Bearer` to Mistral and `api-key` to Azure. Force either for a gateway. |
+| `api_version` | Azure only: value for the `?api-version=` query parameter. |
+| `model` | Model id, or an Azure *deployment* name. Blank uses the parser's own default. |
+
+Because options are part of the cache key, `mistral-ocr-3` can target an Azure
+Foundry deployment while `mistral-ocr-4` talks to `api.mistral.ai` in the same
+workspace, and their results are cached separately.
+
+For Azure AI Foundry, the bare resource root is enough — the OCR path is
+appended for you:
+
+```bash
+export AZURE_MISTRAL_ENDPOINT=https://my-resource.services.ai.azure.com
+export AZURE_MISTRAL_API_KEY=...
+pdfplay run <doc_id> -p mistral-ocr-3 --opt endpoint=azure
+# → POST https://my-resource.services.ai.azure.com/providers/mistral/azure/ocr
+#   with an `api-key` header
+```
+
+Give `base_url` the full URL instead if your deployment does not follow that
+path, and add `--opt api_version=...` if it requires one. In the viewer these
+are ordinary fields in the parser's options panel.
+
+> The Mistral API hosts were unreachable from the environment this was written
+> in (egress policy returns 403 for `api.mistral.ai` and `docs.mistral.ai`), so
+> the model ids `mistral-ocr-3` / `mistral-ocr-4` and the request shape follow
+> the documented API but were not verified against a live endpoint. Every part
+> of the call — model string, URL, auth header, api-version — is overridable per
+> parser instance, so a mismatch is a settings change rather than a code change.
 
 ## The normalized model
 

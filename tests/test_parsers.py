@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import pdfplay.parsers  # noqa: F401  (importing it registers the adapters)
 from pdfplay import registry
 from pdfplay.geometry import page_geometry
 from pdfplay.metrics import bank_statement, generic

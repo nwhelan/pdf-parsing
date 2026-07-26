@@ -153,7 +153,12 @@ def reconstruct_lines(page: PageResult, merge: bool = True) -> list[TextLine]:
     if word_lines:
         return word_lines
 
-    region_blocks = [b for b in page.blocks if b.layer in ("region", "block") and b.text.strip()]
+    # Figures carry no readable text, so a page whose only boxed blocks are
+    # figures (Mistral OCR returns image boxes and nothing else) must fall
+    # through to the page's own text rather than reporting one bogus line.
+    region_blocks = [
+        b for b in page.blocks if b.layer in ("region", "block") and b.kind != "figure" and b.text.strip()
+    ]
     if region_blocks:
         ordered = sorted(
             region_blocks,

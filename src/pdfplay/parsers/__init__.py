@@ -12,6 +12,7 @@ from .anthropic_parser import AnthropicVisionParser
 from .base import Availability, Option, PdfParser
 from .docling_parser import DoclingParser
 from .gemini_parser import GeminiVisionParser
+from .mistral_parser import MistralOCR3Parser, MistralOCR4Parser
 from .openai_parser import OpenAIVisionParser
 from .pdfminer_parser import PdfminerParser
 from .pdfplumber_parser import PdfplumberParser
@@ -31,6 +32,8 @@ for _cls in (
     UnstructuredParser,
     TesseractParser,
     AnthropicVisionParser,
+    MistralOCR3Parser,
+    MistralOCR4Parser,
     OpenAIVisionParser,
     GeminiVisionParser,
 ):

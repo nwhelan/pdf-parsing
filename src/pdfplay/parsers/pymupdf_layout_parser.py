@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import contextlib
 import io
-import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from ..geometry import page_geometry
-from ..models import BBox, Block, PageResult, ParsedDocument, Table, TableCell
+from ..markdown_tables import tables_from_markdown
+from ..models import BBox, Block, PageResult, ParsedDocument
 from .base import Option, PdfParser, select_pages
 
 # `pymupdf4llm.use_layout()` flips module-global state and swaps which function
@@ -261,56 +261,22 @@ def _add_classic_words(page: PageResult, chunk: dict[str, Any]) -> None:
         )
 
 
-_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
-_TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
-
-
-def _split_row(line: str) -> list[str]:
-    inner = _TABLE_ROW.match(line).group(1)
-    return [cell.strip().replace("<br>", "\n").strip() for cell in inner.split("|")]
-
-
 def _add_markdown_tables(page: PageResult, text: str, layout: bool) -> None:
-    """Recover Table objects from the GitHub-flavored tables in the Markdown.
+    """Recover Table objects from the GFM tables in the page Markdown.
 
     Neither engine hands back cell-level structure — the classic one reports a
     table's bbox and shape, the layout one only classifies the region — but both
-    write the cells into the Markdown. Parsing them back is what makes the
-    tables comparable with the other parsers' table output.
+    write the cells into the Markdown.
     """
-    lines = text.splitlines()
-    table_boxes = [b.bbox for b in page.blocks if b.kind == "table" and b.bbox]
-    found = 0
-    i = 0
-    while i < len(lines):
-        if not (_TABLE_ROW.match(lines[i]) and i + 1 < len(lines) and _TABLE_RULE.match(lines[i + 1])):
-            i += 1
-            continue
-        header = _split_row(lines[i])
-        rows = [header]
-        i += 2
-        while i < len(lines) and _TABLE_ROW.match(lines[i]) and not _TABLE_RULE.match(lines[i]):
-            rows.append(_split_row(lines[i]))
-            i += 1
-
-        cells = [
-            TableCell(row=r, col=c, text=value, is_header=(r == 0))
-            for r, row in enumerate(rows)
-            for c, value in enumerate(row)
-        ]
-        bbox = table_boxes[found] if found < len(table_boxes) else None
-        page.tables.append(
-            Table(
-                id=f"p{page.page_number}-md{found}",
-                page=page.page_number,
-                bbox=bbox,
-                n_rows=len(rows),
-                n_cols=max((len(r) for r in rows), default=0),
-                cells=cells,
-                meta={"source": "markdown", "engine": "layout" if layout else "classic"},
-            )
+    boxes = [b.bbox for b in page.blocks if b.kind == "table" and b.bbox]
+    page.tables.extend(
+        tables_from_markdown(
+            page.page_number,
+            text,
+            boxes=boxes,
+            meta={"engine": "layout" if layout else "classic"},
         )
-        found += 1
+    )
 
 
 def _bbox(raw: Any) -> BBox | None:

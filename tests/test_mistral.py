@@ -145,7 +145,7 @@ def fake(monkeypatch):
 
 
 def test_the_request_carries_the_pdf_and_the_model(fake, borderless):
-    fake.parse(borderless.path, [1], fake.resolved_options({"model": "mistral-ocr-9"}))
+    fake.parse(borderless.path, [1], fake.resolved_options({"model": "mistral-ocr-9", "transport": "http"}))
     call = fake.calls[0]
 
     assert call["url"] == MISTRAL_URL
@@ -156,12 +156,12 @@ def test_the_request_carries_the_pdf_and_the_model(fake, borderless):
 
 
 def test_blank_model_falls_back_to_the_parsers_default(fake, borderless):
-    fake.parse(borderless.path, [1], fake.resolved_options({}))
+    fake.parse(borderless.path, [1], fake.resolved_options({"transport": "http"}))
     assert fake.calls[0]["payload"]["model"] == "mistral-ocr-test"
 
 
 def test_markdown_becomes_page_text_tables_and_a_ledger(fake, borderless):
-    parsed = fake.parse(borderless.path, [1], fake.resolved_options({}))
+    parsed = fake.parse(borderless.path, [1], fake.resolved_options({"transport": "http"}))
     page = parsed.pages[0]
 
     assert page.page_number == 1, "response index 0 is page 1"
@@ -177,7 +177,7 @@ def test_markdown_becomes_page_text_tables_and_a_ledger(fake, borderless):
 
 
 def test_image_boxes_are_rescaled_from_pixels_into_points(fake, borderless):
-    parsed = fake.parse(borderless.path, [1], fake.resolved_options({}))
+    parsed = fake.parse(borderless.path, [1], fake.resolved_options({"transport": "http"}))
     page = parsed.pages[0]
     figures = [b for b in page.blocks if b.kind == "figure"]
 
@@ -191,7 +191,7 @@ def test_image_boxes_are_rescaled_from_pixels_into_points(fake, borderless):
 
 
 def test_cost_is_reported_per_page(fake, borderless):
-    parsed = fake.parse(borderless.path, [1], fake.resolved_options({"price_per_1k_pages": 2.0}))
+    parsed = fake.parse(borderless.path, [1], fake.resolved_options({"price_per_1k_pages": 2.0, "transport": "http"}))
     assert parsed.usage.cost_usd == pytest.approx(0.002)
     assert parsed.usage.requests == 1
 
@@ -200,20 +200,137 @@ def test_a_page_the_pdf_does_not_have_is_warned_about_not_crashed(fake, borderle
     monkeypatch.setattr(
         FakeMistral, "post_ocr", lambda *a, **k: {"pages": [{"index": 999, "markdown": "x"}]}
     )
-    parsed = fake.parse(borderless.path, None, fake.resolved_options({}))
+    parsed = fake.parse(borderless.path, None, fake.resolved_options({"transport": "http"}))
     assert parsed.pages == []
     assert any("does not have" in w for w in parsed.warnings)
+
+
+# -- litellm transport ------------------------------------------------------
+
+
+class FakeOCRResponse:
+    """Stands in for litellm's OCRResponse: a pydantic model plus hidden params."""
+
+    def __init__(self, body: dict[str, Any], cost: float | None) -> None:
+        self._body = body
+        self._hidden_params = {"response_cost": cost} if cost is not None else {}
+
+    def model_dump(self) -> dict[str, Any]:
+        return self._body
+
+
+@pytest.fixture
+def fake_litellm(monkeypatch):
+    """Patch litellm.ocr and record what it was called with."""
+    litellm = pytest.importorskip("litellm")
+    calls: list[dict[str, Any]] = []
+
+    def ocr(**kwargs):
+        calls.append(kwargs)
+        return FakeOCRResponse(
+            {
+                "model": "mistral-ocr-2512",
+                "usage_info": {"pages_processed": 1},
+                "pages": [{"index": 0, "markdown": LEDGER_MARKDOWN, "dimensions": {}, "images": []}],
+            },
+            cost=0.0042,
+        )
+
+    monkeypatch.setattr(litellm, "ocr", ocr)
+    monkeypatch.setenv("MISTRAL_API_KEY", "sk-test")
+    return calls
+
+
+def test_auto_transport_prefers_litellm_when_it_is_installed(fake_litellm, borderless):
+    parser = registry.get("mistral-ocr-3")()
+    parsed = parser.parse(borderless.path, [1], parser.resolved_options({}))
+
+    assert len(fake_litellm) == 1, "the request went through litellm, not httpx"
+    assert parsed.pages[0].tables[0].n_rows == 3, "the response maps the same either way"
+
+
+def test_the_endpoint_option_selects_the_litellm_provider(fake_litellm, borderless):
+    parser = registry.get("mistral-ocr-3")()
+    parser.parse(
+        borderless.path,
+        [1],
+        parser.resolved_options(
+            {
+                "transport": "litellm",
+                "endpoint": "azure",
+                "base_url": "https://my-resource.services.ai.azure.com",
+                "model": "mistral-document-ai-2512",
+            }
+        ),
+    )
+    call = fake_litellm[0]
+
+    assert call["model"] == "azure_ai/mistral-document-ai-2512"
+    assert call["api_base"] == "https://my-resource.services.ai.azure.com", (
+        "litellm completes the OCR path itself, so it gets the bare resource root"
+    )
+    assert call["api_key"] == "sk-test"
+    assert call["document"]["document_url"].startswith("data:application/pdf;base64,")
+    assert call["pages"] == [0]
+
+
+def test_a_provider_prefixed_model_is_passed_through(fake_litellm, borderless):
+    parser = registry.get("mistral-ocr-3")()
+    parser.parse(
+        borderless.path,
+        [1],
+        parser.resolved_options({"transport": "litellm", "model": "vertex_ai/mistral-ocr-2505"}),
+    )
+    assert fake_litellm[0]["model"] == "vertex_ai/mistral-ocr-2505"
+
+
+def test_litellms_measured_cost_beats_the_estimate(fake_litellm, borderless):
+    parser = registry.get("mistral-ocr-3")()
+    parsed = parser.parse(
+        borderless.path,
+        [1],
+        parser.resolved_options({"transport": "litellm", "price_per_1k_pages": 999.0}),
+    )
+    assert parsed.usage.cost_usd == pytest.approx(0.0042)
+
+
+def test_http_transport_is_still_reachable_by_name(monkeypatch, borderless):
+    monkeypatch.setenv("MISTRAL_API_KEY", "sk-test")
+    fake = FakeMistral()
+    fake.parse(borderless.path, [1], fake.resolved_options({"transport": "http"}))
+    assert fake.calls[0]["url"] == MISTRAL_URL
 
 
 # -- registration -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("parser_id,model", [("mistral-ocr-3", "mistral-ocr-3"), ("mistral-ocr-4", "mistral-ocr-4")])
+@pytest.mark.parametrize(
+    "parser_id,model", [("mistral-ocr-3", "mistral-ocr-2512"), ("mistral-ocr-4", "mistral-ocr-4-0")]
+)
 def test_both_versions_are_registered_with_their_own_model(parser_id, model):
     cls = registry.get(parser_id)
     assert cls.model_default == model
     assert cls.kind == "remote"
-    assert {o.name for o in cls.options} >= {"model", "endpoint", "base_url", "api_key_env", "auth_header"}
+    assert {o.name for o in cls.options} >= {
+        "model",
+        "endpoint",
+        "base_url",
+        "api_key_env",
+        "auth_header",
+        "transport",
+    }
+
+
+@pytest.mark.parametrize("parser_id", ["mistral-ocr-3", "mistral-ocr-4"])
+def test_the_default_models_are_ids_a_provider_actually_serves(parser_id):
+    """Guard the model strings against litellm's price table.
+
+    Mistral names OCR releases by date rather than by generation, so the ids
+    here are easy to get wrong — and a wrong one is a 404 at the first call.
+    """
+    litellm = pytest.importorskip("litellm")
+    model = registry.get(parser_id).model_default
+    assert f"mistral/{model}" in litellm.model_cost
 
 
 def test_availability_names_the_env_vars_it_looked_for(monkeypatch):

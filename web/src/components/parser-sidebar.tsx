@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { cn } from "@/lib/utils"
 
 type OptionValues = Record<string, Record<string, unknown>>
 
@@ -199,7 +200,9 @@ export function ParserSidebar({
                             ) : (
                               <Input
                                 id={`${current.id}-${opt.name}`}
-                                className="h-7 w-24 text-xs"
+                                // URLs, env var names and model strings all live
+                                // in text options and need the room; numbers don't.
+                                className={cn("h-7 text-xs", opt.type === "str" ? "w-44" : "w-24")}
                                 type={opt.type === "str" ? "text" : "number"}
                                 step={opt.type === "int" ? 1 : "any"}
                                 value={String(value ?? "")}

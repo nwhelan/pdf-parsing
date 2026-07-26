@@ -284,6 +284,15 @@ components on Tailwind v4:
 
 Dark and light themes both ship; the toggle is in the header.
 
+If the viewer says **"Could not load parsers: failed to fetch"**, the page
+reached the static bundle but not the API. It retries five times over about six
+seconds first, then leaves a toast with a Retry button, so a server that was
+still binding its port recovers on its own. If it doesn't, the terminal running
+`pdfplay serve` has the reason — it logs every request at `info` by default;
+`--log-level debug` if you need more. A parser whose availability probe raises
+is reported as unavailable with the exception on its tooltip, rather than
+taking the whole list down with it.
+
 ### Working on the front-end
 
 The build output is committed under `src/pdfplay/server/static`, so

@@ -80,6 +80,42 @@ def test_api_lists_parsers_and_documents(client):
     assert len(docs) == 1
 
 
+def test_one_broken_adapter_does_not_empty_the_parser_list(client, monkeypatch):
+    """The sidebar is built from this list, so it has to survive a bad probe.
+
+    Availability probes import packages and shell out to binaries, so on
+    someone else's machine any of them can raise. Before, that 500'd the whole
+    endpoint and the viewer could only say "failed to fetch".
+    """
+    from pdfplay import registry
+
+    def explode():
+        raise OSError("tesseract is not installed or it's not in your PATH")
+
+    monkeypatch.setattr(registry.get("tesseract"), "check_availability", staticmethod(explode))
+
+    response = client.get("/api/parsers")
+    assert response.status_code == 200
+
+    parsers = {p["id"]: p for p in response.json()}
+    assert len(parsers) == len(registry.all_parsers()), "every parser is still listed"
+    assert parsers["pymupdf"]["available"] is True, "a healthy parser is unaffected"
+    assert parsers["tesseract"]["available"] is False
+    assert "not in your PATH" in parsers["tesseract"]["unavailable_reason"], "the reason is reported"
+
+
+def test_a_broken_probe_does_not_break_run_all(monkeypatch):
+    from pdfplay import registry
+
+    def explode():
+        raise RuntimeError("onnxruntime blew up")
+
+    monkeypatch.setattr(registry.get("tesseract"), "check_availability", staticmethod(explode))
+    ids = [c.id for c in registry.available_parsers()]
+    assert "pymupdf" in ids
+    assert "tesseract" not in ids
+
+
 def test_api_parse_score_and_diff(client):
     doc_id = client.get("/api/documents").json()[0]["doc_id"]
 

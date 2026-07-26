@@ -246,7 +246,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     app = create_app(Workspace(args.workspace))
     print(f"pdfplay → http://{args.host}:{args.port}  (workspace: {Path(args.workspace).resolve()})")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # Requests and tracebacks go to the terminal: when the viewer says it can't
+    # reach the API, this is the only place that can say why.
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0
 
 
@@ -301,6 +303,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve", help="run the web viewer")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument(
+        "--log-level",
+        default="info",
+        choices=["critical", "error", "warning", "info", "debug", "trace"],
+        help="uvicorn log level (default: info, so failed requests are visible)",
+    )
     p.set_defaults(func=cmd_serve)
 
     return parser

@@ -60,16 +60,37 @@ export default function App() {
 
   // -- loading ------------------------------------------------------------
 
+  // The parser list is the whole left rail, so one failed fetch must not end
+  // the session. `pdfplay serve` may still be binding its port when the page
+  // opens, or the request may land while it restarts — both are transient, and
+  // both used to leave the sidebar permanently empty.
+  const loadParsers = React.useCallback(async function load(attempt = 0): Promise<void> {
+    try {
+      setParsers(await api.parsers())
+      setParsersLoading(false)
+    } catch (err) {
+      if (attempt < 4) {
+        await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt))
+        return load(attempt + 1)
+      }
+      setParsersLoading(false)
+      toast.error("Could not load parsers", {
+        description: `${(err as Error).message} — check the terminal running \`pdfplay serve\`.`,
+        action: { label: "Retry", onClick: () => void load() },
+        duration: Infinity,
+      })
+    }
+  }, [])
+
   React.useEffect(() => {
+    void loadParsers()
     api
-      .parsers()
-      .then(setParsers)
-      .catch((err: Error) => toast.error("Could not load parsers", { description: err.message }))
-      .finally(() => setParsersLoading(false))
-    api.documents().then((docs) => {
-      setDocuments(docs)
-      if (docs.length) void selectDocument(docs[0].doc_id)
-    })
+      .documents()
+      .then((docs) => {
+        setDocuments(docs)
+        if (docs.length) void selectDocument(docs[0].doc_id)
+      })
+      .catch((err: Error) => toast.error("Could not load documents", { description: err.message }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

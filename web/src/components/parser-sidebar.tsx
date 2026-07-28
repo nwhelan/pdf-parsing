@@ -1,6 +1,7 @@
-import { CircleAlert, CircleDot, Cloud, Cpu, Play, Settings2 } from "lucide-react"
+import * as React from "react"
+import { Bookmark, CircleAlert, CircleDot, Cloud, Cpu, Play, Settings2, Trash2 } from "lucide-react"
 
-import type { ParserSpec } from "@/lib/api"
+import type { ParserSpec, Preset } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -24,6 +25,7 @@ import {
   SidebarSeparator,
 } from "@/components/ui/sidebar"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
@@ -43,6 +45,10 @@ interface Props {
   running: boolean
   onRun: () => void
   resultCounts: Record<string, number>
+  presets: Preset[]
+  onSavePreset: (parserId: string, name: string) => void
+  onApplyPreset: (preset: Preset) => void
+  onDeletePreset: (presetId: string) => void
 }
 
 export function ParserSidebar({
@@ -59,7 +65,13 @@ export function ParserSidebar({
   running,
   onRun,
   resultCounts,
+  presets,
+  onSavePreset,
+  onApplyPreset,
+  onDeletePreset,
 }: Props) {
+  const [presetName, setPresetName] = React.useState("")
+  const parserPresets = presets.filter((p) => p.parser_id === configuring)
   const current = parsers.find((p) => p.id === configuring) ?? null
   const local = parsers.filter((p) => p.kind === "local")
   const remote = parsers.filter((p) => p.kind === "remote")
@@ -158,11 +170,95 @@ export function ParserSidebar({
                         <span className="font-medium">Cost:</span> {current.cost_hint}
                       </p>
                     )}
+                    {/* Endpoints, deployment names and extraction schemas are
+                        tedious to retype, and a comparison you can't reproduce
+                        tomorrow isn't one. Save the lot under a name. */}
+                    <div className="space-y-1.5 border-y py-2.5">
+                      <Label className="flex items-center gap-1.5 text-xs font-normal">
+                        <Bookmark className="size-3" />
+                        Presets
+                      </Label>
+                      {parserPresets.length > 0 && (
+                        <div className="space-y-1">
+                          {parserPresets.map((preset) => (
+                            <div key={preset.preset_id} className="flex items-center gap-1">
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                className="h-6 flex-1 justify-start px-2 text-xs font-normal"
+                                onClick={() => onApplyPreset(preset)}
+                              >
+                                {preset.name}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="text-muted-foreground size-6"
+                                aria-label={`Delete preset ${preset.name}`}
+                                onClick={() => onDeletePreset(preset.preset_id)}
+                              >
+                                <Trash2 className="size-3" />
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1">
+                        <Input
+                          className="h-7 flex-1 text-xs"
+                          placeholder="Save current options as…"
+                          value={presetName}
+                          onChange={(e) => setPresetName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" || !presetName.trim()) return
+                            onSavePreset(current.id, presetName.trim())
+                            setPresetName("")
+                          }}
+                        />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          disabled={!presetName.trim()}
+                          onClick={() => {
+                            onSavePreset(current.id, presetName.trim())
+                            setPresetName("")
+                          }}
+                        >
+                          Save
+                        </Button>
+                      </div>
+                    </div>
+
                     {current.options.length === 0 && (
                       <p className="text-muted-foreground text-xs">No options.</p>
                     )}
                     {current.options.map((opt) => {
                       const value = optionValues[current.id]?.[opt.name] ?? opt.default
+
+                      // Prompts and JSON schemas need room to breathe, so they
+                      // get the full width rather than a control on the right.
+                      if (opt.type === "text") {
+                        return (
+                          <div key={opt.name} className="space-y-1">
+                            <Label htmlFor={`${current.id}-${opt.name}`} className="text-xs font-normal">
+                              {opt.label}
+                            </Label>
+                            <Textarea
+                              id={`${current.id}-${opt.name}`}
+                              className="min-h-16 font-mono text-[11px]"
+                              rows={4}
+                              spellCheck={false}
+                              value={String(value ?? "")}
+                              onChange={(e) => onOptionChange(current.id, opt.name, e.target.value)}
+                            />
+                            {opt.help && (
+                              <p className="text-muted-foreground text-[11px] leading-snug">{opt.help}</p>
+                            )}
+                          </div>
+                        )
+                      }
+
                       return (
                         <div key={opt.name} className="space-y-1">
                           <div className="flex items-center justify-between gap-2">

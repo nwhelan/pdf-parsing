@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..models import Usage
-from .vision_base import JSON_SCHEMA, VisionParser
+from .vision_base import VisionParser
 
 DEFAULT_MODEL = "gemini-2.5-pro"
 
@@ -42,7 +42,7 @@ class GeminiVisionParser(VisionParser):
             ],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=JSON_SCHEMA,
+                response_schema=self.build_schema(opts),
                 max_output_tokens=int(opts["max_output_tokens"]),
             ),
         )

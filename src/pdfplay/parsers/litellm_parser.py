@@ -20,7 +20,7 @@ from typing import Any
 
 from ..models import Usage
 from .base import Option
-from .vision_base import JSON_SCHEMA, VisionParser
+from .vision_base import VisionParser
 
 
 class LiteLLMVisionParser(VisionParser):
@@ -82,8 +82,8 @@ class LiteLLMVisionParser(VisionParser):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "page_transcription",
-                        "schema": JSON_SCHEMA,
-                        "strict": True,
+                        "schema": self.build_schema(opts),
+                        "strict": not opts.get("extraction_schema"),
                     },
                 }
             }

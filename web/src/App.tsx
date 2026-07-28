@@ -12,7 +12,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
-import { api, type Block, type DocumentDetail, type DocumentMeta, type ParseResult, type ParserSpec, type ScoreResponse } from "@/lib/api"
+import { api, type Block, type DocumentDetail, type DocumentMeta, type ParseResult, type ParserSpec, type Preset, type ScoreResponse } from "@/lib/api"
 import { useTheme } from "@/components/theme-provider"
 import { Inspector } from "@/components/inspector"
 import { PageViewer } from "@/components/page-viewer"
@@ -42,6 +42,7 @@ export default function App() {
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [configuring, setConfiguring] = React.useState<string | null>(null)
   const [optionValues, setOptionValues] = React.useState<Record<string, Record<string, unknown>>>({})
+  const [presets, setPresets] = React.useState<Preset[]>([])
   const [force, setForce] = React.useState(false)
   const [running, setRunning] = React.useState(false)
 
@@ -84,6 +85,7 @@ export default function App() {
 
   React.useEffect(() => {
     void loadParsers()
+    api.presets().then(setPresets).catch(() => setPresets([]))
     api
       .documents()
       .then((docs) => {
@@ -219,6 +221,30 @@ export default function App() {
         onOptionChange={(parserId, name, value) =>
           setOptionValues((prev) => ({ ...prev, [parserId]: { ...prev[parserId], [name]: value } }))
         }
+        presets={presets}
+        onSavePreset={async (parserId, name) => {
+          try {
+            // Store the effective options, defaults included, so a preset means
+            // the same thing later even if a default moves.
+            const spec = parsers.find((p) => p.id === parserId)
+            const merged = Object.fromEntries(
+              (spec?.options ?? []).map((o) => [o.name, optionValues[parserId]?.[o.name] ?? o.default])
+            )
+            const saved = await api.savePreset(name, parserId, merged)
+            setPresets((prev) => [...prev.filter((p) => p.preset_id !== saved.preset_id), saved])
+            toast.success(`Saved "${saved.name}"`)
+          } catch (err) {
+            toast.error("Could not save preset", { description: (err as Error).message })
+          }
+        }}
+        onApplyPreset={(preset) => {
+          setOptionValues((prev) => ({ ...prev, [preset.parser_id]: { ...preset.options } }))
+          toast.success(`Applied "${preset.name}"`)
+        }}
+        onDeletePreset={async (presetId) => {
+          await api.deletePreset(presetId)
+          setPresets((prev) => prev.filter((p) => p.preset_id !== presetId))
+        }}
         force={force}
         onForceChange={setForce}
         running={running}

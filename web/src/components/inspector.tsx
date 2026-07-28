@@ -12,6 +12,7 @@ const TABS: [string, string][] = [
   ["scores", "Scores"],
   ["text", "Text"],
   ["markdown", "Markdown"],
+  ["extraction", "Extraction"],
   ["tables", "Tables"],
   ["diff", "Diff"],
   ["json", "JSON"],
@@ -93,6 +94,21 @@ export function Inspector({
           ) : (
             <p className="text-muted-foreground text-sm">
               {result ? `${result.parser_name} does not emit Markdown.` : "No result selected."}
+            </p>
+          )}
+        </TabsContent>
+
+        <TabsContent value="extraction" className="m-0 p-3">
+          {result?.extraction != null ? (
+            <pre className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+              {JSON.stringify(result.extraction, null, 2)}
+            </pre>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              No structured extraction. Set an extraction schema in the parser's options —
+              <span className="font-mono text-xs"> extraction_schema</span> for vision models,
+              <span className="font-mono text-xs"> document_annotation_schema</span> for Mistral OCR —
+              and the same schema across parsers makes their answers comparable.
             </p>
           )}
         </TabsContent>

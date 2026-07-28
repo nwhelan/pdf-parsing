@@ -45,8 +45,37 @@ class DocumentMeta:
         return asdict(self)
 
 
+@dataclass
+class Preset:
+    """A named set of options for one parser.
+
+    Endpoints, deployment names, extraction schemas and prompts are all just
+    options, and retyping them into a sidebar is how comparisons stop happening.
+    A preset is the configuration under a name, so "Foundry OCR" or "GPT-4.1
+    with the invoice schema" is one click and, crucially, the same one click
+    tomorrow.
+    """
+
+    preset_id: str
+    name: str
+    parser_id: str
+    options: dict[str, Any]
+    created_at: str
+    notes: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _slug(name: str) -> str:
+    cleaned = "".join(c if c.isalnum() else "-" for c in name.lower()).strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned or "preset"
 
 
 def options_key(parser_id: str, options: dict[str, Any] | None, pages: list[int] | None) -> str:
@@ -59,11 +88,69 @@ def options_key(parser_id: str, options: dict[str, Any] | None, pages: list[int]
     return f"{parser_id}__{digest}"
 
 
+# Windows opens text files in the ANSI code page (cp1252), so anything a parser
+# returns from outside it — an em dash, a curly quote, a currency symbol, most
+# of what an OCR model emits — fails to write with "'charmap' codec can't
+# encode character". Every text read and write in the workspace is UTF-8,
+# explicitly, on every platform.
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 class Workspace:
     def __init__(self, root: Path | str = DEFAULT_WORKSPACE) -> None:
         self.root = Path(root)
         self.docs_dir = self.root / "docs"
         self.docs_dir.mkdir(parents=True, exist_ok=True)
+        self.presets_path = self.root / "presets.json"
+
+    # -- presets ---------------------------------------------------------
+
+    def list_presets(self, parser_id: str = "") -> list[Preset]:
+        if not self.presets_path.exists():
+            return []
+        try:
+            raw = read_json(self.presets_path)
+        except (json.JSONDecodeError, OSError):  # pragma: no cover - corrupt file
+            return []
+        presets = [Preset(**item) for item in raw if isinstance(item, dict)]
+        if parser_id:
+            presets = [p for p in presets if p.parser_id == parser_id]
+        return sorted(presets, key=lambda p: p.name.lower())
+
+    def get_preset(self, preset_id: str) -> Preset:
+        for preset in self.list_presets():
+            if preset.preset_id == preset_id or preset.name == preset_id:
+                return preset
+        known = ", ".join(p.preset_id for p in self.list_presets())
+        raise KeyError(f"unknown preset: {preset_id!r} (known: {known})")
+
+    def save_preset(
+        self, name: str, parser_id: str, options: dict[str, Any], notes: str = ""
+    ) -> Preset:
+        """Create or overwrite the preset with this name for this parser."""
+        name = name.strip()
+        if not name:
+            raise ValueError("a preset needs a name")
+        preset = Preset(
+            preset_id=f"{parser_id}__{_slug(name)}",
+            name=name,
+            parser_id=parser_id,
+            options=options,
+            created_at=_now(),
+            notes=notes,
+        )
+        others = [p for p in self.list_presets() if p.preset_id != preset.preset_id]
+        write_json(self.presets_path, [p.as_dict() for p in [*others, preset]])
+        return preset
+
+    def delete_preset(self, preset_id: str) -> None:
+        kept = [p.as_dict() for p in self.list_presets() if p.preset_id != preset_id]
+        write_json(self.presets_path, kept)
 
     # -- documents -------------------------------------------------------
 
@@ -83,10 +170,10 @@ class Workspace:
 
         meta_path = doc_dir / "meta.json"
         if meta_path.exists():
-            meta = DocumentMeta(**json.loads(meta_path.read_text()))
+            meta = DocumentMeta(**read_json(meta_path))
             if doc_class and not meta.doc_class:
                 meta.doc_class = doc_class
-                meta_path.write_text(json.dumps(meta.as_dict(), indent=2))
+                write_json(meta_path, meta.as_dict())
             return meta
 
         meta = DocumentMeta(
@@ -98,14 +185,14 @@ class Workspace:
             added_at=_now(),
             doc_class=doc_class,
         )
-        meta_path.write_text(json.dumps(meta.as_dict(), indent=2))
+        write_json(meta_path, meta.as_dict())
         return meta
 
     def list_documents(self) -> list[DocumentMeta]:
         out = []
         for meta_path in sorted(self.docs_dir.glob("*/meta.json")):
             try:
-                out.append(DocumentMeta(**json.loads(meta_path.read_text())))
+                out.append(DocumentMeta(**read_json(meta_path)))
             except Exception:  # pragma: no cover - skip corrupt entries
                 continue
         return sorted(out, key=lambda m: m.added_at, reverse=True)
@@ -114,10 +201,10 @@ class Workspace:
         meta_path = self.docs_dir / doc_id / "meta.json"
         if not meta_path.exists():
             raise KeyError(f"unknown document: {doc_id}")
-        return DocumentMeta(**json.loads(meta_path.read_text()))
+        return DocumentMeta(**read_json(meta_path))
 
     def update_document(self, meta: DocumentMeta) -> DocumentMeta:
-        (self.docs_dir / meta.doc_id / "meta.json").write_text(json.dumps(meta.as_dict(), indent=2))
+        write_json(self.docs_dir / meta.doc_id / "meta.json", meta.as_dict())
         return meta
 
     def delete_document(self, doc_id: str) -> None:
@@ -149,7 +236,7 @@ class Workspace:
     def save_result(self, result: ParseResult, key: str) -> Path:
         path = self.result_path(result.doc_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(result.model_dump_json())
+        path.write_text(result.model_dump_json(), encoding="utf-8")
         return path
 
     def load_result(self, doc_id: str, key: str) -> ParseResult | None:
@@ -157,7 +244,7 @@ class Workspace:
         if not path.exists():
             return None
         try:
-            return ParseResult.model_validate_json(path.read_text())
+            return ParseResult.model_validate_json(path.read_text(encoding="utf-8"))
         except Exception:  # pragma: no cover - stale schema
             return None
 
@@ -166,7 +253,7 @@ class Workspace:
         results_dir = self.docs_dir / doc_id / "results"
         for path in sorted(results_dir.glob("*.json")):
             try:
-                data = json.loads(path.read_text())
+                data = read_json(path)
             except Exception:
                 continue
             out.append(
@@ -196,7 +283,7 @@ class Workspace:
         path = self.ground_truth_path(doc_id)
         if not path.exists():
             return None
-        return json.loads(path.read_text())
+        return read_json(path)
 
     def set_ground_truth(self, doc_id: str, data: dict[str, Any]) -> None:
-        self.ground_truth_path(doc_id).write_text(json.dumps(data, indent=2))
+        write_json(self.ground_truth_path(doc_id), data)

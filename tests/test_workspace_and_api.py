@@ -61,18 +61,6 @@ def test_page_render_is_cached_on_disk(workspace: Workspace, borderless):
 # -- API --------------------------------------------------------------------
 
 
-@pytest.fixture
-def client(workspace: Workspace, borderless):
-    fastapi_testclient = pytest.importorskip("fastapi.testclient")
-    from pdfplay.server.app import create_app
-
-    workspace.add_document(borderless.path, doc_class="bank_statement")
-    workspace.set_ground_truth(
-        workspace.list_documents()[0].doc_id, {"transactions": borderless.ledger["transactions"]}
-    )
-    return fastapi_testclient.TestClient(create_app(workspace))
-
-
 def test_api_lists_parsers_and_documents(client):
     parsers = client.get("/api/parsers").json()
     assert any(p["id"] == "pymupdf" and p["available"] for p in parsers)

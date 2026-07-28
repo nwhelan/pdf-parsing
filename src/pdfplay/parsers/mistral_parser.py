@@ -36,6 +36,7 @@ Both return the same JSON shape, so everything downstream is shared.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 from pathlib import Path
@@ -45,6 +46,7 @@ from ..geometry import page_geometry
 from ..markdown_tables import tables_from_markdown
 from ..models import BBox, Block, PageResult, ParsedDocument, Usage
 from .base import Availability, Option, PdfParser, _importable, select_pages
+from .vision_base import VisionParser
 
 MISTRAL_URL = "https://api.mistral.ai/v1/ocr"
 
@@ -128,6 +130,28 @@ class MistralOCRParser(PdfParser):
             help="HTTP transport, Azure only: value for the ?api-version= query parameter.",
         ),
         Option("include_images", "bool", False, help="Ask for image crops as base64 (large responses)."),
+        Option(
+            "document_annotation_schema",
+            "text",
+            "",
+            help=(
+                "JSON Schema for document-level extraction. Mistral returns an object matching "
+                "it alongside the Markdown. Paste a bare schema; the json_schema envelope is "
+                "added for you."
+            ),
+        ),
+        Option(
+            "document_annotation_prompt",
+            "text",
+            "",
+            help="Instructions to go with the extraction schema.",
+        ),
+        Option(
+            "bbox_annotation_schema",
+            "text",
+            "",
+            help="JSON Schema applied to each image region — captions, chart summaries, labels.",
+        ),
         Option("timeout_s", "int", 300),
         Option("price_per_1k_pages", "float", 1.0, help="Used only to report an estimated cost."),
     )
@@ -225,6 +249,30 @@ class MistralOCRParser(PdfParser):
             return {"api-key": key}
         return {"Authorization": f"Bearer {key}"}
 
+    # -- data extraction -------------------------------------------------
+
+    @classmethod
+    def annotation_params(cls, opts: dict[str, Any]) -> dict[str, Any]:
+        """Mistral's structured-extraction parameters, from the schema options.
+
+        The API wants each schema wrapped in a ``json_schema`` envelope. Asking
+        for that by hand is a papercut in a text box, so a bare schema is
+        wrapped here and an already-wrapped one is passed through.
+        """
+        params: dict[str, Any] = {}
+        for option, param, name in (
+            ("document_annotation_schema", "document_annotation_format", "document_annotation"),
+            ("bbox_annotation_schema", "bbox_annotation_format", "bbox_annotation"),
+        ):
+            schema = VisionParser.parse_schema(opts.get(option), label=option)
+            if schema is not None:
+                params[param] = _as_json_schema(schema, name)
+
+        prompt = str(opts.get("document_annotation_prompt") or "").strip()
+        if prompt:
+            params["document_annotation_prompt"] = prompt
+        return params
+
     # -- transports (patched in tests) -----------------------------------
 
     def use_litellm(self, opts: dict[str, Any]) -> bool:
@@ -250,14 +298,14 @@ class MistralOCRParser(PdfParser):
         """
         import litellm
 
+        extras = {k: v for k, v in payload.items() if k not in ("model", "document")}
         response = litellm.ocr(
             model=self.resolve_litellm_model(opts, model),
             document=payload["document"],
             api_key=self.resolve_key(opts),
             api_base=self.configured_base(opts) or None,
             timeout=float(opts["timeout_s"]),
-            include_image_base64=payload["include_image_base64"],
-            **({"pages": payload["pages"]} if "pages" in payload else {}),
+            **extras,
         )
         body = response.model_dump()
         cost = getattr(response, "_hidden_params", {}).get("response_cost")
@@ -280,6 +328,7 @@ class MistralOCRParser(PdfParser):
             "model": model,
             "document": {"type": "document_url", "document_url": data_url},
             "include_image_base64": bool(opts["include_images"]),
+            **self.annotation_params(opts),
         }
         if pages:
             payload["pages"] = [p - 1 for p in wanted]  # the API counts pages from 0
@@ -323,6 +372,8 @@ class MistralOCRParser(PdfParser):
             )
             _add_image_regions(page, raw)
             page.tables.extend(tables_from_markdown(page_no, text, meta={"model": model}))
+            if raw.get("image_annotations"):  # bbox_annotation_format results
+                page.meta["image_annotations"] = raw["image_annotations"]
             out_pages.append(page)
 
         if not out_pages:
@@ -339,14 +390,31 @@ class MistralOCRParser(PdfParser):
         )
         usage = Usage(model=body.get("model") or model, requests=1, cost_usd=round(cost, 6))
 
+        # The annotation comes back as a JSON *string*, since the schema was
+        # sent as a response format. Decode it so it lands next to every other
+        # parser's extraction rather than as an opaque blob.
+        annotation = body.get("document_annotation")
+        if isinstance(annotation, str) and annotation.strip():
+            try:
+                annotation = json.loads(annotation)
+            except json.JSONDecodeError:
+                warnings.append("document_annotation was not valid JSON; kept as text")
+
         per_page = {p.page_number: elapsed / max(1, len(out_pages)) for p in out_pages}
         return ParsedDocument(
             pages=out_pages,
             markdown="\n\n---\n\n".join(markdown_parts) if markdown_parts else None,
+            extraction=annotation or None,
             usage=usage,
             warnings=warnings,
             per_page_s=per_page,
         )
+
+
+def _as_json_schema(schema: dict[str, Any], name: str) -> dict[str, Any]:
+    if schema.get("type") == "json_schema" and "json_schema" in schema:
+        return schema  # already an envelope
+    return {"type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": True}}
 
 
 def _add_image_regions(page: PageResult, raw: dict[str, Any]) -> None:

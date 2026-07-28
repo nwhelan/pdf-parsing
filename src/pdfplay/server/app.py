@@ -36,7 +36,7 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
                 "<pre>cd web &amp;&amp; npm ci &amp;&amp; npm run build</pre>"
                 "<p>The JSON API is up regardless — see <a href='/docs'>/docs</a>.</p>"
             )
-        return page.read_text()
+        return page.read_text(encoding="utf-8")
 
     @app.get("/favicon.ico")
     def favicon() -> Response:
@@ -47,6 +47,30 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
     @app.get("/api/parsers")
     def parsers() -> list[dict[str, Any]]:
         return registry.describe_all()
+
+    # -- presets ---------------------------------------------------------
+
+    @app.get("/api/presets")
+    def presets(parser_id: str = Query("")) -> list[dict[str, Any]]:
+        return [p.as_dict() for p in ws.list_presets(parser_id)]
+
+    @app.post("/api/presets")
+    def save_preset(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            preset = ws.save_preset(
+                name=str(payload.get("name") or ""),
+                parser_id=str(payload.get("parser_id") or ""),
+                options=payload.get("options") or {},
+                notes=str(payload.get("notes") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return preset.as_dict()
+
+    @app.delete("/api/presets/{preset_id}")
+    def delete_preset(preset_id: str) -> dict[str, bool]:
+        ws.delete_preset(preset_id)
+        return {"ok": True}
 
     # -- documents -------------------------------------------------------
 

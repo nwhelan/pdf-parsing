@@ -56,7 +56,7 @@ class SampleDocument:
 
     def write_ledger(self, path: Path | None = None) -> Path:
         target = path or self.path.with_suffix(".ledger.json")
-        target.write_text(json.dumps(self.ledger, indent=2))
+        target.write_text(json.dumps(self.ledger, indent=2, ensure_ascii=False), encoding="utf-8")
         return target
 
 

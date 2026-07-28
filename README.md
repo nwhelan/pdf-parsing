@@ -104,6 +104,56 @@ to `text` for servers that only partly implement structured output.
 The stock `openai` parser takes the same options, so pointing *it* somewhere
 else works too — `openai-compatible` exists so both can sit in one comparison.
 
+## Comparing models, not just libraries
+
+A library comparison is settled by the library. A *model* comparison is only
+meaningful if every model was asked the same question in the same shape, so
+three things are options rather than constants.
+
+**Instructions.** Every vision parser takes `instructions`, applied to each
+page. `instructions_mode=append` (the default) adds them under the standard
+transcription prompt; `replace` hands the model your text alone.
+
+```bash
+pdfplay run <doc_id> -p claude -p openai -p gemini \
+  --opt instructions='Treat parentheses as negative amounts. Never reformat dates.'
+```
+
+**An extraction schema.** Set `extraction_schema` to a JSON Schema and the
+model returns an `extraction` object matching it *alongside* the transcription —
+one call, so you can score the structured answer and the page text together.
+The same schema across models is the whole point:
+
+```bash
+SCHEMA='{"type":"object","properties":{
+  "account_number":{"type":"string"},
+  "closing_balance":{"type":"number"}}}'
+pdfplay run <doc_id> -p claude --opt extraction_schema="$SCHEMA"
+pdfplay run <doc_id> -p litellm --opt model=gemini/gemini-2.5-pro --opt extraction_schema="$SCHEMA"
+```
+
+Mistral OCR has its own native version of this, so it can answer the same
+question through its own API rather than through a prompt — see below. Whichever
+route produced it, the result lands in the same `extraction` field and the same
+**Extraction** tab in the viewer.
+
+**Presets.** An endpoint, a deployment name, a prompt and a schema are a lot to
+retype, and a comparison you can't re-run tomorrow isn't one. Save the lot under
+a name:
+
+```bash
+pdfplay presets --save "Foundry OCR" -p mistral-ocr-3 \
+        --opt endpoint=azure --opt model=mistral-document-ai-2512
+pdfplay presets                                   # list them
+pdfplay run <doc_id> --preset "Foundry OCR"       # implies its parser
+pdfplay presets --delete mistral-ocr-3__foundry-ocr
+```
+
+`--preset` can be repeated and mixed with `-p`, and an explicit `--opt`
+overrides the stored value for that run. In the viewer, the same presets live at
+the top of the options panel: type a name, hit Save, click to re-apply. They're
+stored in `workspace/presets.json`, so they travel with the workspace.
+
 ### Mistral OCR
 
 Mistral OCR is document-level rather than page-image-level: you post the whole
@@ -146,6 +196,28 @@ parser ids here are labels and the model strings are what actually gets sent:
 Set `model` to whatever your account exposes. A test asserts the two defaults
 exist in litellm's model table, so a stale id fails the suite rather than the
 first API call.
+
+**Data extraction.** Mistral OCR takes a JSON Schema and returns structured
+fields next to the Markdown, which is a different mechanism from prompting a
+vision model for JSON and worth comparing against one. Three options carry it:
+
+| Option | Sent as | Effect |
+|---|---|---|
+| `document_annotation_schema` | `document_annotation_format` | Fields extracted from the document as a whole. |
+| `document_annotation_prompt` | `document_annotation_prompt` | Instructions to go with that schema. |
+| `bbox_annotation_schema` | `bbox_annotation_format` | Applied to each image region — captions, chart summaries. |
+
+Paste a bare schema; the `json_schema` envelope the API wants is added for you,
+and an already-wrapped one is passed through untouched. The answer comes back
+JSON-decoded in the result's `extraction` field — the same field the vision
+parsers' `extraction_schema` fills, so the two approaches line up in the
+**Extraction** tab.
+
+```bash
+pdfplay run <doc_id> -p mistral-ocr-3 \
+  --opt document_annotation_schema='{"type":"object","properties":{"closing_balance":{"type":"number"}}}' \
+  --opt document_annotation_prompt='Read the balance from the summary box, not the ledger.'
+```
 
 **Azure AI Foundry.** The bare resource root is enough — the OCR path is
 completed for you:
@@ -318,7 +390,8 @@ pdfplay list                       # parsers and availability
 pdfplay samples [--out DIR]        # generate synthetic statements + ledgers
 pdfplay add FILE [--class C] [--ledger L]
 pdfplay docs                       # list documents in the workspace
-pdfplay run DOC_ID (--all | -p parser)... [--pages 1,2] [--force] [--opt k=v]
+pdfplay run DOC_ID (--all | -p parser | --preset name)... [--pages 1,2] [--force] [--opt k=v]
+pdfplay presets [-p parser] [--save NAME --opt k=v] [--delete PRESET_ID]
 pdfplay score DOC_ID [--class bank_statement] [--json]
 pdfplay compare DOC_ID -p a -p b   # two-way diff between two parsers
 pdfplay serve [--host H] [--port P]
@@ -338,7 +411,10 @@ identical content and disagree only about reading order — which matters for
 prompt-stuffing an LLM but not for row-wise extraction.
 
 The workspace lives in `./workspace` by default; override with
-`PDFPLAY_WORKSPACE`.
+`PDFPLAY_WORKSPACE` or `pdfplay --workspace DIR ...`. Everything it writes —
+results, metadata, presets — is UTF-8 regardless of platform, so a parser that
+returns an em dash or a currency symbol doesn't fail on save under a Windows
+code page.
 
 ## Adding a parser
 

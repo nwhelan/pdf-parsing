@@ -100,8 +100,8 @@ class OpenAIVisionParser(VisionParser):
             return AzureOpenAI(azure_endpoint=base_url, api_version=version, api_key=key)
         return OpenAI(api_key=key, base_url=base_url or None)
 
-    @staticmethod
-    def response_format(opts: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def response_format(cls, opts: dict[str, Any], schema: dict[str, Any] | None = None) -> dict[str, Any]:
         choice = opts.get("response_format") or "json_schema"
         if choice == "json_schema":
             return {
@@ -109,8 +109,11 @@ class OpenAIVisionParser(VisionParser):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "page_transcription",
-                        "schema": JSON_SCHEMA,
-                        "strict": True,
+                        "schema": schema or JSON_SCHEMA,
+                        # A user-supplied extraction schema won't satisfy strict
+                        # mode's requirements (every property required, no extra
+                        # properties), so strictness follows the default schema.
+                        "strict": schema is None,
                     },
                 }
             }
@@ -139,7 +142,7 @@ class OpenAIVisionParser(VisionParser):
                     ],
                 }
             ],
-            **self.response_format(opts),
+            **self.response_format(opts, self.build_schema(opts)),
         )
         text = response.choices[0].message.content or "{}"
         usage = Usage(

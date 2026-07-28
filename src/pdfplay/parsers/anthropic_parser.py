@@ -13,7 +13,7 @@ from typing import Any
 
 from ..models import Usage
 from .base import Option
-from .vision_base import JSON_SCHEMA, VisionParser
+from .vision_base import VisionParser
 
 DEFAULT_MODEL = "claude-opus-5"
 
@@ -59,7 +59,7 @@ class AnthropicVisionParser(VisionParser):
             max_tokens=int(opts["max_output_tokens"]),
             output_config={
                 "effort": opts["effort"],
-                "format": {"type": "json_schema", "schema": JSON_SCHEMA},
+                "format": {"type": "json_schema", "schema": self.build_schema(opts)},
             },
             messages=[
                 {

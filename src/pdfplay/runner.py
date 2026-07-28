@@ -62,6 +62,7 @@ def run_parser(
         parsed = parser_cls().parse(pdf_path, pages, resolved)
         result.pages = parsed.pages
         result.markdown = parsed.markdown
+        result.extraction = parsed.extraction
         result.usage = parsed.usage
         result.warnings = parsed.warnings
         result.per_page_s = parsed.per_page_s

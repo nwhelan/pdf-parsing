@@ -304,7 +304,7 @@ export function ParserSidebar({
                                   opt.type === "str" ? "w-44 min-w-24 flex-1" : "w-24 shrink-0"
                                 )}
                                 // A parser can suggest values without forbidding
-                                // others — litellm lists the models in config.yaml.
+                                // others — config.yaml supplies the model names.
                                 list={opt.choices?.length ? `${current.id}-${opt.name}-list` : undefined}
                                 type={opt.type === "str" ? "text" : "number"}
                                 step={opt.type === "int" ? 1 : "any"}

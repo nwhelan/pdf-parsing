@@ -14,7 +14,7 @@ import textwrap
 
 import pytest
 
-from pdfplay import litellm_config
+from pdfplay import model_config
 from pdfplay.metrics import extraction
 from pdfplay.workspace import Workspace
 
@@ -202,25 +202,25 @@ def test_scoring_says_nothing_about_extraction_without_a_golden(client):
     assert "extraction_score" not in scores["rows"][0]
 
 
-# -- LiteLLM config ---------------------------------------------------------
+# -- model config.yaml ------------------------------------------------------
 
 
 CONFIG = textwrap.dedent(
     """
     model_list:
-      - model_name: statement-ocr
+      - model_name: statement-vision
         litellm_params:
-          model: azure_ai/mistral-document-ai-2512
-          api_base: https://my-resource.services.ai.azure.com
-          api_key: os.environ/AZURE_AI_API_KEY
+          model: azure/gpt-4.1-deployment
+          api_base: https://my-resource.openai.azure.com
+          api_key: os.environ/AZURE_OPENAI_API_KEY
           api_version: "2026-01-01"
-      - model_name: cheap-vision
+      - model_name: local-vision
         litellm_params:
-          model: gemini/gemini-2.5-flash
-          api_key: os.environ/GEMINI_API_KEY
-      - model_name: statement-ocr
+          model: hosted_vllm/qwen2-vl
+          api_base: http://localhost:8000/v1
+      - model_name: statement-vision
         litellm_params:
-          model: azure_ai/a-second-deployment
+          model: azure/a-second-deployment
     """
 )
 
@@ -228,130 +228,137 @@ CONFIG = textwrap.dedent(
 @pytest.fixture
 def config_file(tmp_path, monkeypatch):
     pytest.importorskip("yaml")
-    path = tmp_path / "litellm.config.yaml"
+    path = tmp_path / "config.yaml"
     path.write_text(CONFIG, encoding="utf-8")
-    monkeypatch.setenv("PDFPLAY_LITELLM_CONFIG", str(path))
-    monkeypatch.setenv("AZURE_AI_API_KEY", "sk-azure")
+    monkeypatch.setenv("PDFPLAY_MODEL_CONFIG", str(path))
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "sk-azure")
     return path
 
 
 def test_model_names_come_from_the_config(config_file):
-    assert litellm_config.model_names() == ["statement-ocr", "cheap-vision"]
+    assert model_config.model_names() == ["statement-vision", "local-vision"]
 
 
 def test_a_configured_model_brings_its_endpoint_and_key(config_file):
-    params = litellm_config.resolve_model("statement-ocr")
-    assert params["model"] == "azure_ai/mistral-document-ai-2512"
-    assert params["api_base"] == "https://my-resource.services.ai.azure.com"
-    assert params["api_version"] == "2026-01-01"
-    assert params["api_key"] == "sk-azure", "os.environ/NAME is resolved at call time"
+    resolved = model_config.resolve_model("statement-vision")
+    assert resolved["base_url"] == "https://my-resource.openai.azure.com"
+    assert resolved["api_version"] == "2026-01-01"
+    assert resolved["api_key"] == "sk-azure", "os.environ/NAME is resolved at call time"
+
+
+def test_the_provider_prefix_is_stripped_because_the_url_decides_the_provider(config_file):
+    assert model_config.resolve_model("statement-vision")["model"] == "gpt-4.1-deployment"
+    assert model_config.resolve_model("local-vision")["model"] == "qwen2-vl"
+    assert model_config.strip_provider("gpt-4.1") == "gpt-4.1", "an unprefixed id is untouched"
 
 
 def test_the_first_deployment_of_a_duplicated_name_wins(config_file):
     """A repeated model_name is proxy load balancing; here it names one endpoint."""
-    assert litellm_config.resolve_model("statement-ocr")["model"].endswith("mistral-document-ai-2512")
+    assert model_config.resolve_model("statement-vision")["model"] == "gpt-4.1-deployment"
 
 
 def test_an_unset_referenced_variable_says_which_one(config_file, monkeypatch):
-    monkeypatch.delenv("AZURE_AI_API_KEY")
-    with pytest.raises(RuntimeError, match="AZURE_AI_API_KEY is not set"):
-        litellm_config.resolve_model("statement-ocr")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY")
+    with pytest.raises(RuntimeError, match="AZURE_OPENAI_API_KEY is not set"):
+        model_config.resolve_model("statement-vision")
 
 
 def test_secrets_are_strippable_for_logging(config_file):
-    redacted = litellm_config.redacted(litellm_config.resolve_model("statement-ocr"))
+    redacted = model_config.redacted(model_config.resolve_model("statement-vision"))
     assert "api_key" not in redacted
-    assert redacted["api_base"].endswith("azure.com")
+    assert redacted["base_url"].endswith("azure.com")
 
 
 def test_an_unknown_model_is_not_an_error(config_file):
-    assert litellm_config.resolve_model("no-such-model") is None
+    assert model_config.resolve_model("no-such-model") is None
 
 
 def test_no_config_anywhere_is_not_an_error(monkeypatch, tmp_path):
-    monkeypatch.delenv("PDFPLAY_LITELLM_CONFIG", raising=False)
-    monkeypatch.delenv("LITELLM_CONFIG_PATH", raising=False)
+    for name in model_config.CONFIG_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
-    assert litellm_config.find_config() is None
-    assert litellm_config.model_names() == []
-    assert litellm_config.describe() == {"path": "", "models": []}
+    assert model_config.find_config() is None
+    assert model_config.model_names() == []
+    assert model_config.describe() == {"path": "", "models": []}
 
 
 def test_a_malformed_config_does_not_take_the_parser_list_down(tmp_path, monkeypatch):
     pytest.importorskip("yaml")
     bad = tmp_path / "broken.yaml"
     bad.write_text("model_list: [ this is not: valid: yaml", encoding="utf-8")
-    monkeypatch.setenv("PDFPLAY_LITELLM_CONFIG", str(bad))
-    assert litellm_config.model_names() == []
+    monkeypatch.setenv("PDFPLAY_MODEL_CONFIG", str(bad))
+    assert model_config.model_names() == []
 
 
-def test_the_parser_offers_configured_names_and_uses_their_parameters(config_file, monkeypatch):
-    pytest.importorskip("litellm")
+def test_the_parser_offers_configured_names_as_suggestions(config_file):
+    pytest.importorskip("openai")
     import pdfplay.parsers  # noqa: F401
     from pdfplay import registry
 
-    cls = registry.get("litellm")
+    cls = registry.get("openai-compatible")
     model_option = next(o for o in cls.describe()["options"] if o["name"] == "model")
-    assert model_option["choices"] == ["statement-ocr", "cheap-vision"]
-    assert model_option["type"] == "str", "still free text: a raw provider/model must work"
-
-    params = cls.configured_params(cls.resolved_options({"model": "statement-ocr"}))
-    assert params["model"] == "azure_ai/mistral-document-ai-2512"
-    assert params["api_base"].endswith("azure.com")
-
-    assert cls.configured_params(cls.resolved_options({"model": "anthropic/claude-sonnet-4-5"})) == {}
+    assert model_option["choices"] == ["statement-vision", "local-vision"]
+    assert model_option["type"] == "str", "still free text: any model id must work"
 
 
-def test_a_configured_model_reaches_litellm_with_its_endpoint(config_file, monkeypatch):
-    litellm = pytest.importorskip("litellm")
+def test_a_configured_model_builds_an_azure_client_pointed_at_its_endpoint(config_file):
+    pytest.importorskip("openai")
+    from openai import AzureOpenAI
+
     import pdfplay.parsers  # noqa: F401
     from pdfplay import registry
 
-    calls: list[dict] = []
+    cls = registry.get("openai-compatible")
+    opts = cls.resolved_options({"model": "statement-vision"})
 
-    class Response:
-        _hidden_params = {"response_cost": 0.001}
-        choices = [type("C", (), {"message": type("M", (), {"content": "{}"})()})()]
-        usage = type("U", (), {"prompt_tokens": 1, "completion_tokens": 2})()
+    settings = cls.settings(opts)
+    assert settings["model"] == "gpt-4.1-deployment", "the deployment name is what gets sent"
+    assert settings["api_key"] == "sk-azure"
 
-    monkeypatch.setattr(litellm, "completion", lambda **kw: (calls.append(kw), Response())[1])
+    client = cls.build_client(opts)
+    assert isinstance(client, AzureOpenAI), "api_version in the config selects the Azure client"
+    assert "my-resource.openai.azure.com" in str(client.base_url)
 
-    parser = registry.get("litellm")()
-    parser.call_model(b"png", "prompt", parser.resolved_options({"model": "statement-ocr"}))
 
-    sent = calls[0]
-    assert sent["model"] == "azure_ai/mistral-document-ai-2512"
-    assert sent["api_base"] == "https://my-resource.services.ai.azure.com"
-    assert sent["api_key"] == "sk-azure"
-    assert sent["api_version"] == "2026-01-01"
+def test_a_configured_local_model_builds_a_plain_client(config_file):
+    pytest.importorskip("openai")
+    from openai import OpenAI
+
+    import pdfplay.parsers  # noqa: F401
+    from pdfplay import registry
+
+    cls = registry.get("openai-compatible")
+    client = cls.build_client(cls.resolved_options({"model": "local-vision"}))
+    assert isinstance(client, OpenAI)
+    assert str(client.base_url).rstrip("/") == "http://localhost:8000/v1"
 
 
 def test_an_explicit_option_still_overrides_the_config(config_file, monkeypatch):
-    litellm = pytest.importorskip("litellm")
+    pytest.importorskip("openai")
     import pdfplay.parsers  # noqa: F401
     from pdfplay import registry
 
     monkeypatch.setenv("MY_KEY", "sk-override")
-    calls: list[dict] = []
-
-    class Response:
-        _hidden_params: dict = {}
-        choices = [type("C", (), {"message": type("M", (), {"content": "{}"})()})()]
-        usage = type("U", (), {"prompt_tokens": 1, "completion_tokens": 2})()
-
-    monkeypatch.setattr(litellm, "completion", lambda **kw: (calls.append(kw), Response())[1])
-
-    parser = registry.get("litellm")()
-    parser.call_model(
-        b"png",
-        "prompt",
-        parser.resolved_options(
-            {"model": "statement-ocr", "api_base": "http://localhost:4000", "api_key_env": "MY_KEY"}
-        ),
+    cls = registry.get("openai-compatible")
+    settings = cls.settings(
+        cls.resolved_options(
+            {"model": "statement-vision", "base_url": "http://localhost:4000/v1", "api_key_env": "MY_KEY"}
+        )
     )
-    assert calls[0]["api_base"] == "http://localhost:4000"
-    assert calls[0]["api_key"] == "sk-override"
-    assert calls[0]["model"] == "azure_ai/mistral-document-ai-2512", "the config still names the model"
+    assert settings["base_url"] == "http://localhost:4000/v1"
+    assert settings["api_key"] == "sk-override"
+    assert settings["model"] == "gpt-4.1-deployment", "the config still names the model"
+
+
+def test_a_model_the_config_does_not_mention_is_sent_as_written(config_file):
+    pytest.importorskip("openai")
+    import pdfplay.parsers  # noqa: F401
+    from pdfplay import registry
+
+    cls = registry.get("openai")
+    settings = cls.settings(cls.resolved_options({"model": "gpt-4.1"}), env={"OPENAI_API_KEY": "sk-a"})
+    assert settings["model"] == "gpt-4.1"
+    assert settings["base_url"] == ""
 
 
 # -- CLI --------------------------------------------------------------------

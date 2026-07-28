@@ -168,23 +168,19 @@ def test_the_prompt_and_bbox_schema_travel_with_it():
 
 
 def test_annotation_parameters_are_sent_and_the_answer_comes_back(monkeypatch, borderless):
-    litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("MISTRAL_API_KEY", "sk-test")
     calls: list[dict[str, Any]] = []
 
-    class Response:
-        _hidden_params: dict = {}
+    def post_ocr(self, url, headers, payload, timeout):
+        calls.append(payload)
+        return {
+            "model": "mistral-ocr-2512",
+            "pages": [{"index": 0, "markdown": "# statement", "dimensions": {}, "images": []}],
+            # Mistral returns the annotation as a JSON string.
+            "document_annotation": '{"account_number": "12345", "closing_balance": 5078.59}',
+        }
 
-        @staticmethod
-        def model_dump():
-            return {
-                "model": "mistral-ocr-2512",
-                "pages": [{"index": 0, "markdown": "# statement", "dimensions": {}, "images": []}],
-                # Mistral returns the annotation as a JSON string.
-                "document_annotation": '{"account_number": "12345", "closing_balance": 5078.59}',
-            }
-
-    monkeypatch.setattr(litellm, "ocr", lambda **kw: (calls.append(kw), Response())[1])
+    monkeypatch.setattr(MistralOCRParser, "post_ocr", post_ocr)
 
     parser = registry.get("mistral-ocr-3")()
     parsed = parser.parse(
@@ -192,7 +188,6 @@ def test_annotation_parameters_are_sent_and_the_answer_comes_back(monkeypatch, b
         [1],
         parser.resolved_options(
             {
-                "transport": "litellm",
                 "document_annotation_schema": json.dumps(INVOICE_SCHEMA),
                 "document_annotation_prompt": "Only the ledger.",
             }
@@ -206,23 +201,19 @@ def test_annotation_parameters_are_sent_and_the_answer_comes_back(monkeypatch, b
 
 
 def test_an_unparseable_annotation_is_warned_about_not_dropped(monkeypatch, borderless):
-    litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("MISTRAL_API_KEY", "sk-test")
 
-    class Response:
-        _hidden_params: dict = {}
-
-        @staticmethod
-        def model_dump():
-            return {
-                "model": "m",
-                "pages": [{"index": 0, "markdown": "x", "dimensions": {}, "images": []}],
-                "document_annotation": "sorry, I could not comply",
-            }
-
-    monkeypatch.setattr(litellm, "ocr", lambda **kw: Response())
+    monkeypatch.setattr(
+        MistralOCRParser,
+        "post_ocr",
+        lambda *a, **k: {
+            "model": "m",
+            "pages": [{"index": 0, "markdown": "x", "dimensions": {}, "images": []}],
+            "document_annotation": "sorry, I could not comply",
+        },
+    )
     parser = registry.get("mistral-ocr-3")()
-    parsed = parser.parse(borderless.path, [1], parser.resolved_options({"transport": "litellm"}))
+    parsed = parser.parse(borderless.path, [1], parser.resolved_options({}))
 
     assert parsed.extraction == "sorry, I could not comply"
     assert any("not valid JSON" in w for w in parsed.warnings)
@@ -254,12 +245,12 @@ def test_saving_the_same_name_updates_rather_than_duplicates(workspace: Workspac
 
 def test_presets_are_listed_per_parser_and_deletable(workspace: Workspace):
     workspace.save_preset("Foundry", "mistral-ocr-3", {})
-    workspace.save_preset("Local llava", "litellm", {"model": "ollama/llava"})
+    workspace.save_preset("Local llava", "openai-compatible", {"model": "llava"})
 
     assert len(workspace.list_presets()) == 2
-    assert [p.name for p in workspace.list_presets("litellm")] == ["Local llava"]
+    assert [p.name for p in workspace.list_presets("openai-compatible")] == ["Local llava"]
 
-    workspace.delete_preset("litellm__local-llava")
+    workspace.delete_preset("openai-compatible__local-llava")
     assert [p.parser_id for p in workspace.list_presets()] == ["mistral-ocr-3"]
 
 
@@ -282,7 +273,7 @@ def test_the_api_exposes_presets(client):
 
     listed = client.get("/api/presets", params={"parser_id": "openai"}).json()
     assert [p["name"] for p in listed] == ["GPT-4.1"]
-    assert client.get("/api/presets", params={"parser_id": "litellm"}).json() == []
+    assert client.get("/api/presets", params={"parser_id": "openai-compatible"}).json() == []
 
     assert client.delete(f"/api/presets/{created['preset_id']}").json() == {"ok": True}
     assert client.get("/api/presets").json() == []

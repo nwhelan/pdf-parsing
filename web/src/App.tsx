@@ -17,6 +17,7 @@ import { useTheme } from "@/components/theme-provider"
 import { Inspector } from "@/components/inspector"
 import { PageViewer } from "@/components/page-viewer"
 import { ParserSidebar } from "@/components/parser-sidebar"
+import { ErrorLog, ErrorLogButton, type RunError } from "@/components/error-log"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -43,6 +44,8 @@ export default function App() {
   const [configuring, setConfiguring] = React.useState<string | null>(null)
   const [optionValues, setOptionValues] = React.useState<Record<string, Record<string, unknown>>>({})
   const [presets, setPresets] = React.useState<Preset[]>([])
+  const [errors, setErrors] = React.useState<RunError[]>([])
+  const [errorLogOpen, setErrorLogOpen] = React.useState(false)
   const [force, setForce] = React.useState(false)
   const [running, setRunning] = React.useState(false)
 
@@ -124,6 +127,23 @@ export default function App() {
         }
       }
       setResults(loaded)
+
+      // Failed results are stored, so a reload must not lose the reason they
+      // failed — seed the log from them rather than only from live runs.
+      setErrors(
+        Object.entries(loaded)
+          .filter(([, r]) => r.status !== "ok")
+          .map(([key, r]) => ({
+            id: key,
+            parserId: r.parser_id,
+            parserName: r.parser_name || r.parser_id,
+            at: r.created_at || "",
+            message: r.error ?? "unknown error",
+            debug: r.debug ?? [],
+            detail: r.warnings ?? [],
+          }))
+      )
+
       const keys = Object.keys(loaded)
       setLeftKey(keys[0] ?? null)
       setRightKey(keys[1] ?? keys[0] ?? null)
@@ -134,24 +154,55 @@ export default function App() {
 
   // -- actions ------------------------------------------------------------
 
+  // A failure gets a toast that goes away and an entry that doesn't. The toast
+  // says something broke; the log says what was sent when it did.
+  const recordFailure = React.useCallback(
+    (parserId: string, message: string, result?: ParseResult) => {
+      const entry: RunError = {
+        id: `${parserId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        parserId,
+        parserName: result?.parser_name || parserId,
+        at: new Date().toLocaleTimeString(),
+        message,
+        debug: result?.debug ?? [],
+        detail: result?.warnings ?? [],
+      }
+      setErrors((prev) => [entry, ...prev.filter((e) => e.parserId !== parserId)])
+      toast.error(`${parserId} failed`, {
+        id: `run-${parserId}`,
+        description: message.length > 140 ? `${message.slice(0, 140)}…` : message,
+        duration: 6000,
+        action: { label: "Details", onClick: () => setErrorLogOpen(true) },
+      })
+    },
+    []
+  )
+
   async function runSelected() {
     if (!doc) return
     setRunning(true)
     const next = { ...results }
     for (const id of selected) {
-      const toastId = toast.loading(`Running ${id}…`)
+      // `toast.loading` is created with an infinite duration; updating that id
+      // without saying otherwise keeps it, which is how failures used to pile up
+      // on screen forever. Every terminal state sets its own duration.
+      const toastId = `run-${id}`
+      toast.loading(`Running ${id}…`, { id: toastId })
       try {
         const out = await api.parse(doc.doc_id, id, { options: optionValues[id] ?? {}, force })
         next[out.key] = out.result
         if (out.result.status === "error") {
-          toast.error(`${id} failed`, { id: toastId, description: out.result.error ?? "" })
+          toast.dismiss(toastId)
+          recordFailure(id, out.result.error ?? "unknown error", out.result)
         } else {
           toast.success(`${id} — ${out.result.duration_s.toFixed(2)}s${out.cached ? " (cached)" : ""}`, {
             id: toastId,
+            duration: 4000,
           })
         }
       } catch (err) {
-        toast.error(`${id} failed`, { id: toastId, description: (err as Error).message })
+        toast.dismiss(toastId)
+        recordFailure(id, (err as Error).message)
       }
     }
     setResults(next)
@@ -168,9 +219,13 @@ export default function App() {
       const meta = await api.upload(file)
       setDocuments(await api.documents())
       await selectDocument(meta.doc_id)
-      toast.success(`Added ${meta.name}`, { id: toastId, description: `${meta.pages} page(s)` })
+      toast.success(`Added ${meta.name}`, {
+        id: toastId,
+        description: `${meta.pages} page(s)`,
+        duration: 4000,
+      })
     } catch (err) {
-      toast.error("Upload failed", { id: toastId, description: (err as Error).message })
+      toast.error("Upload failed", { id: toastId, description: (err as Error).message, duration: 8000 })
     }
   }
 
@@ -362,6 +417,7 @@ export default function App() {
                 compare
               </Label>
             </div>
+            <ErrorLogButton errors={errors} onOpen={() => setErrorLogOpen(true)} />
             <Button
               variant="ghost"
               size="icon"
@@ -372,6 +428,16 @@ export default function App() {
             </Button>
           </div>
         </header>
+
+        <ErrorLog
+          errors={errors}
+          open={errorLogOpen}
+          onOpenChange={setErrorLogOpen}
+          onClear={() => {
+            setErrors([])
+            setErrorLogOpen(false)
+          }}
+        />
 
         <div className="min-h-0 flex-1">
           {!doc ? (
@@ -436,6 +502,7 @@ export default function App() {
                   leftKey={leftKey}
                   rightKey={rightKey}
                   selectedBlock={selectedBlock}
+                onShowErrors={() => setErrorLogOpen(true)}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>

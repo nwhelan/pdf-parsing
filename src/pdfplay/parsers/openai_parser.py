@@ -63,6 +63,12 @@ ENDPOINT_OPTIONS = (
         help="Lower this if a server rejects strict schemas. 'text' relies on the prompt alone.",
     ),
     Option(
+        "debug",
+        "bool",
+        False,
+        help="Also record the full prompt and the raw response body in the result's debug log.",
+    ),
+    Option(
         "config_path",
         "str",
         "",
@@ -212,10 +218,11 @@ class OpenAIVisionParser(VisionParser):
 
         client = self.build_client(opts)
         data_url = "data:image/png;base64," + base64.standard_b64encode(png).decode("ascii")
-        response = client.chat.completions.create(
-            model=model,
-            max_tokens=int(opts["max_output_tokens"]),
-            messages=[
+        verbose = bool(opts.get("debug"))
+        request: dict[str, Any] = {
+            "model": model,
+            "max_tokens": int(opts["max_output_tokens"]),
+            "messages": [
                 {
                     "role": "user",
                     "content": [
@@ -225,7 +232,28 @@ class OpenAIVisionParser(VisionParser):
                 }
             ],
             **self.response_format(opts, self.build_schema(opts)),
+        }
+
+        # Recorded before the call, so a failure still shows what was attempted:
+        # which client, which URL, which model, and the exact request shape.
+        self.record_request(
+            "chat.completions.create",
+            client=type(client).__name__,
+            model=model,
+            # The resolved setting rather than the client's attribute: it is
+            # what was asked for, and it survives a client that doesn't expose
+            # one. Blank means the SDK's own default (api.openai.com).
+            base_url=settings["base_url"],
+            client_base_url=str(getattr(client, "base_url", "")) or None,
+            api_version=settings["api_version"] or None,
+            model_source="config.yaml" if self.configured(opts) else "option",
+            image_bytes=len(png),
+            prompt_chars=len(prompt),
+            request=request if verbose else {**request, "messages": _shape(request["messages"])},
         )
+
+        response = client.chat.completions.create(**request)
+        self.record_response("chat.completions", response.model_dump(), verbose=verbose)
         text = response.choices[0].message.content or "{}"
         usage = Usage(
             input_tokens=getattr(response.usage, "prompt_tokens", None),
@@ -235,6 +263,17 @@ class OpenAIVisionParser(VisionParser):
         )
         usage.cost_usd = self.estimate_cost(model, usage.input_tokens or 0, usage.output_tokens or 0)
         return self.loads(text), usage
+
+
+def _shape(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The message structure without the payloads, for the non-verbose log."""
+    return [
+        {
+            "role": message.get("role"),
+            "content": [part.get("type") for part in message.get("content") or []],
+        }
+        for message in messages
+    ]
 
 
 class OpenAICompatibleParser(OpenAIVisionParser):

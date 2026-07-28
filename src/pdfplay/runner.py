@@ -57,19 +57,24 @@ def run_parser(
         workspace.save_result(result, key)
         return result, key, False
 
+    parser = parser_cls()
     started = time.perf_counter()
     try:
-        parsed = parser_cls().parse(pdf_path, pages, resolved)
+        parsed = parser.parse(pdf_path, pages, resolved)
         result.pages = parsed.pages
         result.markdown = parsed.markdown
         result.extraction = parsed.extraction
         result.usage = parsed.usage
         result.warnings = parsed.warnings
         result.per_page_s = parsed.per_page_s
+        result.debug = parsed.debug or parser.debug_events
     except Exception as exc:
         result.status = "error"
         result.error = f"{type(exc).__name__}: {exc}"
         result.warnings.append(traceback.format_exc(limit=6))
+        # The request that preceded the failure is the thing worth seeing, and
+        # it only exists on the adapter instance — hence keeping one around.
+        result.debug = parser.debug_events
     result.duration_s = time.perf_counter() - started
 
     workspace.save_result(result, key)

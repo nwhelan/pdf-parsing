@@ -424,6 +424,44 @@ in that rail, so it needs to be able to grow.
 
 Dark and light themes both ship; the toggle is in the header.
 
+### When a parser fails
+
+A failure produces a toast that goes away and an entry that doesn't. The toast
+names the parser and disappears after a few seconds; the entry lands in a
+failures log, reachable from the ⚠ count in the header or the *Details* button
+on the scores pane. Failed results are stored like any other, so the log is
+seeded from them on reload — a failure from yesterday is still inspectable.
+
+Each entry carries **the request that preceded it**, which is usually the only
+way to read the error:
+
+```json
+{
+  "event": "chat.completions.create",
+  "client": "AzureOpenAI",
+  "model": "claude-sonnet-5",
+  "base_url": "https://my-resource.openai.azure.com",
+  "api_version": "2026-01-01",
+  "model_source": "option",
+  "image_bytes": 652538,
+  "prompt_chars": 899,
+  "request": { "model": "…", "messages": [{"role": "user", "content": ["image_url", "text"]}] }
+}
+```
+
+`DeploymentNotFound: claude-sonnet-5` is a different problem depending on
+whether `model_source` says `option` or `config.yaml`, and a 400 asking for a
+`document_annotation_prompt` is only readable next to the payload that omitted
+it. Adapters record before they call, so the request survives the failure.
+
+Turn on a parser's **`debug`** option and the log also keeps the full prompt, the
+image data URL and the raw response body — the whole request as sent, for when
+the shape itself is in question. Off by default because the bodies are large.
+
+Credentials never reach the log: anything whose key looks like a secret is
+masked, and long values (a base64 PDF, an image) are truncated to their shape.
+The log is part of the stored result, so it's in the JSON tab too.
+
 If the viewer says **"Could not load parsers: failed to fetch"**, the page
 reached the static bundle but not the API. It retries five times over about six
 seconds first, then leaves a toast with a Retry button, so a server that was

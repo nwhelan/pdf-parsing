@@ -28,6 +28,7 @@ interface Props {
   leftKey: string | null
   rightKey: string | null
   selectedBlock: Block | null
+  onShowErrors?: () => void
 }
 
 export function Inspector({
@@ -38,6 +39,7 @@ export function Inspector({
   leftKey,
   rightKey,
   selectedBlock,
+  onShowErrors,
 }: Props) {
   const [tab, setTab] = React.useState("scores")
   const [diff, setDiff] = React.useState<DiffResponse | null>(null)
@@ -70,7 +72,7 @@ export function Inspector({
 
       <ScrollArea className="min-h-0 flex-1">
         <TabsContent value="scores" className="m-0">
-          <ScoresPanel scores={scores} />
+          <ScoresPanel scores={scores} onShowErrors={onShowErrors} />
         </TabsContent>
 
         <TabsContent value="text" className="m-0 p-3">

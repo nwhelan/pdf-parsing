@@ -2,7 +2,8 @@ import { AlertTriangle, Banknote, Gauge, GitCompare, Target } from "lucide-react
 
 import type { ScoreResponse } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -40,7 +41,13 @@ function SectionCard({
   )
 }
 
-export function ScoresPanel({ scores }: { scores: ScoreResponse | null }) {
+export function ScoresPanel({
+  scores,
+  onShowErrors,
+}: {
+  scores: ScoreResponse | null
+  onShowErrors?: () => void
+}) {
   if (!scores || scores.rows.length === 0) {
     return (
       <p className="text-muted-foreground p-4 text-sm">
@@ -57,13 +64,23 @@ export function ScoresPanel({ scores }: { scores: ScoreResponse | null }) {
 
   return (
     <div className="space-y-3 p-3">
-      {failed.map((row) => (
-        <Alert key={row.key} variant="destructive">
-          <AlertTriangle />
-          <AlertTitle>{row.parser_id} failed</AlertTitle>
-          <AlertDescription>{row.error}</AlertDescription>
+      {/* One line, not a stack of full-width alerts. Failed results are stored,
+          so the old rendering re-buried the scores on every reload. */}
+      {failed.length > 0 && (
+        <Alert variant="destructive" className="flex items-center gap-2 py-2">
+          <AlertTriangle className="size-4" />
+          <AlertDescription className="flex-1 truncate text-xs">
+            {failed.length === 1
+              ? `${failed[0].parser_id} failed: ${failed[0].error ?? ""}`
+              : `${failed.length} parsers failed: ${failed.map((r) => r.parser_id).join(", ")}`}
+          </AlertDescription>
+          {onShowErrors && (
+            <Button variant="outline" size="sm" className="h-6 shrink-0 px-2 text-xs" onClick={onShowErrors}>
+              Details
+            </Button>
+          )}
         </Alert>
-      ))}
+      )}
 
       <SectionCard title="Generic signals" icon={<Gauge className="size-3.5" />}>
         <Table>

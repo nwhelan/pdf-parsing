@@ -232,6 +232,7 @@ class VisionParser(PdfParser):
             out_pages.append(result)
 
         return ParsedDocument(
+            debug=self.debug_events,
             pages=out_pages,
             markdown="\n\n---\n\n".join(markdown_parts) if markdown_parts else None,
             # One request per page, so the document-level extraction is the

@@ -58,6 +58,27 @@ class Option:
         }
 
 
+# Anything that looks like a credential, wherever it turns up in a header or a
+# request body. Debug output is written to disk and read in a browser.
+SECRET_HINTS = ("authorization", "api-key", "api_key", "key", "token", "secret", "password")
+# Long values are almost always a base64 document or an image; the shape is the
+# useful part, not the megabyte.
+MAX_DEBUG_VALUE = 600
+
+
+def redact(value: Any, key: str = "") -> Any:
+    """Copy a request structure with secrets masked and bulk values truncated."""
+    if any(hint in key.lower() for hint in SECRET_HINTS) and isinstance(value, str) and value:
+        return f"<{len(value)} chars redacted>"
+    if isinstance(value, dict):
+        return {k: redact(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact(v, key) for v in value]
+    if isinstance(value, str) and len(value) > MAX_DEBUG_VALUE:
+        return f"{value[:MAX_DEBUG_VALUE]}… (+{len(value) - MAX_DEBUG_VALUE} chars)"
+    return value
+
+
 class PdfParser:
     """Adapter interface. Subclasses implement :meth:`parse`.
 
@@ -81,6 +102,33 @@ class PdfParser:
 
     def parse(self, pdf_path: Path, pages: list[int] | None, options: dict[str, Any]) -> ParsedDocument:
         raise NotImplementedError
+
+    # -- debug -----------------------------------------------------------
+
+    @property
+    def debug_events(self) -> list[dict[str, Any]]:
+        """What this adapter sent, in order.
+
+        The runner reads this whether :meth:`parse` returned or raised, which is
+        the point: the request that *preceded* a failure is the thing you need
+        to see, and by the time the error surfaces it is otherwise gone.
+        """
+        if not hasattr(self, "_debug_events"):
+            self._debug_events: list[dict[str, Any]] = []
+        return self._debug_events
+
+    def record_request(self, label: str, **fields: Any) -> None:
+        """Record one outgoing request, redacted and truncated."""
+        self.debug_events.append({"event": label, **{k: redact(v, k) for k, v in fields.items()}})
+
+    def record_response(self, label: str, body: Any, verbose: bool = False) -> None:
+        """Record what came back. Bodies are kept only in verbose (debug) mode."""
+        event: dict[str, Any] = {"event": label}
+        if isinstance(body, dict):
+            event["keys"] = sorted(body)
+        if verbose:
+            event["body"] = redact(body)
+        self.debug_events.append(event)
 
     # -- helpers ---------------------------------------------------------
 

@@ -187,6 +187,7 @@ class ParseResult(BaseModel):
     extraction: Any | None = None
     usage: Usage = Field(default_factory=Usage)
     warnings: list[str] = Field(default_factory=list)
+    debug: list[dict[str, Any]] = Field(default_factory=list)
 
     def text(self) -> str:
         return "\n\n".join(p.text for p in self.pages)
@@ -225,4 +226,6 @@ class ParsedDocument(BaseModel):
     extraction: Any | None = None
     usage: Usage = Field(default_factory=Usage)
     warnings: list[str] = Field(default_factory=list)
+    # What the adapter actually sent, redacted. Kept on failures especially.
+    debug: list[dict[str, Any]] = Field(default_factory=list)
     per_page_s: dict[int, float] = Field(default_factory=dict)

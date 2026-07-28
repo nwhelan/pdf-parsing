@@ -131,6 +131,12 @@ class MistralOCRParser(PdfParser):
             "",
             help="JSON Schema applied to each image region — captions, chart summaries, labels.",
         ),
+        Option(
+            "debug",
+            "bool",
+            False,
+            help="Also record the raw response body in the result's debug log.",
+        ),
         Option("timeout_s", "int", 300),
         Option("price_per_1k_pages", "float", 1.0, help="Used only to report an estimated cost."),
     )
@@ -265,14 +271,24 @@ class MistralOCRParser(PdfParser):
         if pages:
             payload["pages"] = [p - 1 for p in wanted]  # the API counts pages from 0
 
-        started = time.perf_counter()
-        body = self.post_ocr(
-            self.resolve_endpoint(opts),
-            {"Content-Type": "application/json", **self.resolve_auth(opts)},
-            payload,
-            float(opts["timeout_s"]),
+        url = self.resolve_endpoint(opts)
+        headers = {"Content-Type": "application/json", **self.resolve_auth(opts)}
+        verbose = bool(opts.get("debug"))
+
+        # Recorded before the POST: a 400 about a missing annotation prompt or a
+        # 404 on a deployment name is only diagnosable against what was sent.
+        self.record_request(
+            "POST",
+            url=url,
+            headers=headers,
+            endpoint=opts.get("endpoint"),
+            payload=payload,
         )
+
+        started = time.perf_counter()
+        body = self.post_ocr(url, headers, payload, float(opts["timeout_s"]))
         elapsed = time.perf_counter() - started
+        self.record_response("ocr", body, verbose=verbose)
 
         warnings: list[str] = []
         out_pages: list[PageResult] = []
@@ -324,6 +340,7 @@ class MistralOCRParser(PdfParser):
 
         per_page = {p.page_number: elapsed / max(1, len(out_pages)) for p in out_pages}
         return ParsedDocument(
+            debug=self.debug_events,
             pages=out_pages,
             markdown="\n\n---\n\n".join(markdown_parts) if markdown_parts else None,
             extraction=annotation or None,

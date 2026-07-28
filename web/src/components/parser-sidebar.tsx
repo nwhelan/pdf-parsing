@@ -282,7 +282,7 @@ export function ParserSidebar({
                                   )
                                 }
                               >
-                                <SelectTrigger size="sm" className="h-7 w-32 text-xs">
+                                <SelectTrigger size="sm" className="h-7 w-32 shrink-0 text-xs">
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -296,9 +296,16 @@ export function ParserSidebar({
                             ) : (
                               <Input
                                 id={`${current.id}-${opt.name}`}
-                                // URLs, env var names and model strings all live
-                                // in text options and need the room; numbers don't.
-                                className={cn("h-7 text-xs", opt.type === "str" ? "w-44" : "w-24")}
+                                // URLs, env var names and model strings all live in
+                                // text options and take the slack as the rail widens;
+                                // numbers stay narrow.
+                                className={cn(
+                                  "h-7 text-xs",
+                                  opt.type === "str" ? "w-44 min-w-24 flex-1" : "w-24 shrink-0"
+                                )}
+                                // A parser can suggest values without forbidding
+                                // others — litellm lists the models in config.yaml.
+                                list={opt.choices?.length ? `${current.id}-${opt.name}-list` : undefined}
                                 type={opt.type === "str" ? "text" : "number"}
                                 step={opt.type === "int" ? 1 : "any"}
                                 value={String(value ?? "")}
@@ -316,6 +323,13 @@ export function ParserSidebar({
                               />
                             )}
                           </div>
+                          {opt.type === "str" && opt.choices?.length ? (
+                            <datalist id={`${current.id}-${opt.name}-list`}>
+                              {opt.choices.map((choice) => (
+                                <option key={String(choice)} value={String(choice)} />
+                              ))}
+                            </datalist>
+                          ) : null}
                           {opt.help && <p className="text-muted-foreground text-[11px] leading-snug">{opt.help}</p>}
                         </div>
                       )

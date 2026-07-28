@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import registry
-from .metrics import bank_statement, generic
+from .metrics import bank_statement, extraction, generic
 from .models import ParseResult
 from .runner import run_many
 from .workspace import DEFAULT_WORKSPACE, Workspace
@@ -145,6 +145,26 @@ def cmd_presets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_golden(args: argparse.Namespace) -> int:
+    """Set or show the known-correct extraction for a document."""
+    ws = _workspace(args)
+    doc_id = _resolve_doc(ws, args.doc_id)
+
+    if args.set:
+        data = json.loads(Path(args.set).read_text(encoding="utf-8"))
+        ws.set_golden_extraction(doc_id, data)
+        fields = len(extraction.flatten(data))
+        print(f"golden set for {doc_id}: {fields} field(s)")
+        return 0
+
+    golden = ws.get_golden_extraction(doc_id)
+    if golden is None:
+        print("no golden extraction — `pdfplay golden DOC_ID --set FILE.json`")
+        return 1
+    print(json.dumps(golden, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     doc_id = _resolve_doc(ws, args.doc_id)
@@ -178,8 +198,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
 def _rows(ws: Workspace, doc_id: str, doc_class: str) -> list[dict[str, Any]]:
-    ledger = (ws.get_ground_truth(doc_id) or {}).get("transactions")
+    truth = ws.get_ground_truth(doc_id) or {}
+    ledger = truth.get("transactions")
+    golden = truth.get("extraction")
     rows = []
     for meta in ws.list_results(doc_id):
         result: ParseResult | None = ws.load_result(doc_id, meta["key"])
@@ -191,6 +217,8 @@ def _rows(ws: Workspace, doc_id: str, doc_class: str) -> list[dict[str, Any]]:
             row["bank_statement"] = bank_statement.analyze(result).as_dict()
             if ledger:
                 row["ledger_score"] = bank_statement.score_against_ledger(result, ledger)
+        if golden is not None:
+            row["extraction_score"] = extraction.score_against_golden(result.extraction, golden)
         rows.append(row)
     return rows
 
@@ -218,6 +246,27 @@ def cmd_score(args: argparse.Namespace) -> int:
             f"{row['parser_id']:<13} {row['seconds_per_page']:>6.2f} {row['n_chars']:>7} "
             f"{row['n_lines']:>6} {row['page_coverage']:>6} {row['reading_order_score']:>6} {cost:>8}"
         )
+
+    if any(row.get("extraction_score") for row in rows):
+        print(f"\n{'parser':<13} {'fields':>6} {'right':>6} {'acc':>6} {'P':>6} {'R':>6} {'F1':>6}")
+        for row in rows:
+            score = row.get("extraction_score")
+            if not score:
+                continue
+            print(
+                f"{row['parser_id']:<13} {score['n_fields']:>6} {score['n_correct']:>6} "
+                f"{_pct(score['accuracy']):>6} {_pct(score['precision']):>6} "
+                f"{_pct(score['recall']):>6} {_pct(score['f1']):>6}"
+            )
+        if args.fields:
+            for row in rows:
+                score = row.get("extraction_score")
+                if not score:
+                    continue
+                print(f"\n{row['parser_id']}")
+                for field in score["fields"]:
+                    mark = {"correct": "✓", "wrong": "✗", "missing": "-", "extra": "+"}[field["status"]]
+                    print(f"  {mark} {field['path']:<32} want={field['expected']!r} got={field['actual']!r}")
 
     if doc_class == "bank_statement":
         print(f"\n{'parser':<13} {'txns':>5} {'recon':>6} {'amt col':>8} {'bal col':>8} {'totals':>7}")
@@ -339,8 +388,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--delete", metavar="PRESET_ID")
     p.set_defaults(func=cmd_presets)
 
+    p = sub.add_parser("golden", help="the known-correct extraction for a document")
+    p.add_argument("doc_id")
+    p.add_argument("--set", metavar="FILE.json", help="store this JSON as the golden answer")
+    p.set_defaults(func=cmd_golden)
+
     p = sub.add_parser("score", help="score every stored result for a document")
     p.add_argument("doc_id")
+    p.add_argument("--fields", action="store_true", help="per-field extraction detail vs the golden set")
     p.add_argument("--class", dest="doc_class", default="", help="override the document class")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_score)

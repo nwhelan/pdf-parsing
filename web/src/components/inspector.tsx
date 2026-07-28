@@ -1,12 +1,13 @@
 import * as React from "react"
 
-import { api, type Block, type DiffResponse, type ParseResult, type ScoreResponse } from "@/lib/api"
+import { api, type Block, type DiffResponse, type ExtractionScore, type ParseResult, type ScoreResponse } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScoresPanel } from "@/components/scores-panel"
+import { cn } from "@/lib/utils"
 
 const TABS: [string, string][] = [
   ["scores", "Scores"],
@@ -53,6 +54,7 @@ export function Inspector({
   }, [tab, docId, leftKey, rightKey])
 
   const pageResult = result?.pages.find((p) => p.page_number === page)
+  const extractionScore = scores?.rows.find((r) => r.key === leftKey)?.extraction_score
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="flex h-full min-h-0 flex-col gap-0">
@@ -98,17 +100,32 @@ export function Inspector({
           )}
         </TabsContent>
 
-        <TabsContent value="extraction" className="m-0 p-3">
+        <TabsContent value="extraction" className="m-0 space-y-4 p-3">
+          {extractionScore && <GoldenComparison score={extractionScore} />}
+
           {result?.extraction != null ? (
-            <pre className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
-              {JSON.stringify(result.extraction, null, 2)}
-            </pre>
+            <div>
+              {extractionScore && (
+                <p className="text-muted-foreground mb-1 text-xs font-medium">Raw extraction</p>
+              )}
+              <pre className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+                {JSON.stringify(result.extraction, null, 2)}
+              </pre>
+            </div>
           ) : (
             <p className="text-muted-foreground text-sm">
               No structured extraction. Set an extraction schema in the parser's options —
               <span className="font-mono text-xs"> extraction_schema</span> for vision models,
               <span className="font-mono text-xs"> document_annotation_schema</span> for Mistral OCR —
               and the same schema across parsers makes their answers comparable.
+            </p>
+          )}
+
+          {!extractionScore && result?.extraction != null && (
+            <p className="text-muted-foreground border-t pt-3 text-xs">
+              Store a golden answer to score this —{" "}
+              <span className="font-mono">pdfplay golden DOC_ID --set golden.json</span> — and every
+              parser gets a field-by-field comparison against it.
             </p>
           )}
         </TabsContent>
@@ -214,5 +231,69 @@ export function Inspector({
         </TabsContent>
       </ScrollArea>
     </Tabs>
+  )
+}
+
+
+const STATUS_STYLE: Record<string, string> = {
+  correct: "text-emerald-600 dark:text-emerald-400",
+  wrong: "text-destructive",
+  missing: "text-amber-600 dark:text-amber-400",
+  extra: "text-muted-foreground",
+}
+
+function show(value: unknown) {
+  if (value === null || value === undefined) return "—"
+  return typeof value === "string" ? value : JSON.stringify(value)
+}
+
+/** Field-by-field against the golden set: the per-field verdict is the finding,
+ *  a single accuracy number just tells you something went wrong somewhere. */
+function GoldenComparison({ score }: { score: ExtractionScore }) {
+  const pct = (value: number | null) => (value === null ? "—" : `${Math.round(value * 100)}%`)
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="font-medium">vs golden</span>
+        <span>
+          {score.n_correct}/{score.n_fields} fields
+        </span>
+        <span className="text-muted-foreground">accuracy {pct(score.accuracy)}</span>
+        <span className="text-muted-foreground">P {pct(score.precision)}</span>
+        <span className="text-muted-foreground">R {pct(score.recall)}</span>
+        <span className="text-muted-foreground">F1 {pct(score.f1)}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="text-xs">Field</TableHead>
+              <TableHead className="text-xs">Expected</TableHead>
+              <TableHead className="text-xs">Got</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {score.fields.map((field) => (
+              <TableRow key={field.path}>
+                <TableCell className="font-mono text-[11px] whitespace-nowrap">
+                  <span className={STATUS_STYLE[field.status]}>
+                    {field.status === "correct" ? "✓" : field.status === "wrong" ? "✗" : field.status === "missing" ? "–" : "+"}
+                  </span>{" "}
+                  {field.path}
+                </TableCell>
+                <TableCell className="text-[11px]">{show(field.expected)}</TableCell>
+                <TableCell className={cn("text-[11px]", STATUS_STYLE[field.status])}>
+                  {show(field.actual)}
+                  {field.similarity !== undefined && (
+                    <span className="text-muted-foreground ml-1">({field.similarity})</span>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
   )
 }

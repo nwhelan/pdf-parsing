@@ -18,6 +18,7 @@ import base64
 import os
 from typing import Any
 
+from .. import litellm_config
 from ..models import Usage
 from .base import Option
 from .vision_base import VisionParser
@@ -57,8 +58,49 @@ class LiteLLMVisionParser(VisionParser):
             choices=["json_schema", "json_object", "text"],
             help="Dropped automatically if the routed model doesn't support it.",
         ),
+        Option(
+            "config_path",
+            "str",
+            "",
+            help=(
+                "LiteLLM proxy config.yaml. Blank looks at $PDFPLAY_LITELLM_CONFIG, "
+                "$LITELLM_CONFIG_PATH, then ./litellm.config.yaml and ./config.yaml. "
+                "A model named in it brings its own endpoint and credentials."
+            ),
+        ),
         Option("num_retries", "int", 2, help="Retries litellm makes on a failed call."),
     )
+
+    # -- config file -----------------------------------------------------
+
+    @classmethod
+    def describe(cls) -> dict[str, Any]:
+        """Offer the configured model names as suggestions for `model`.
+
+        The names are read at describe time rather than baked in, so editing
+        config.yaml and reloading the viewer is enough to see a new model. The
+        option stays free text — a provider/model string that isn't in the
+        config still works.
+        """
+        spec = super().describe()
+        names = litellm_config.model_names()
+        if names:
+            for option in spec["options"]:
+                if option["name"] == "model":
+                    option["choices"] = names
+                    option["help"] = (
+                        f"A model_name from {litellm_config.find_config()}, "
+                        "or any provider/model string."
+                    )
+        return spec
+
+    @classmethod
+    def configured_params(cls, opts: dict[str, Any]) -> dict[str, Any]:
+        """Call parameters from config.yaml for this model, if it names one."""
+        model = (opts.get("model") or "").strip()
+        if not model:
+            return {}
+        return litellm_config.resolve_model(model, (opts.get("config_path") or "").strip()) or {}
 
     # Keys are per-provider and the provider isn't known until the model option
     # is set, so availability only checks that litellm is importable.
@@ -104,13 +146,25 @@ class LiteLLMVisionParser(VisionParser):
         if named and not api_key:
             raise RuntimeError(f"no API key: {named} is not set")
 
+        # A model_name from config.yaml supplies the real model string, the
+        # endpoint and the credentials; anything set explicitly here still wins,
+        # so the config is a starting point rather than a cage.
+        params = self.configured_params(opts)
+        explicit = {
+            "model": model,
+            "api_base": (opts.get("api_base") or "").strip() or None,
+            "api_key": api_key,
+        }
+        params.update({k: v for k, v in explicit.items() if v is not None and k != "model"})
+        if "model" not in params:
+            params["model"] = model
+        schema_model = params["model"]
+
         data_url = "data:image/png;base64," + base64.standard_b64encode(png).decode("ascii")
         response = litellm.completion(
-            model=model,
+            **params,
             max_tokens=int(opts["max_output_tokens"]),
             num_retries=int(opts["num_retries"]),
-            api_base=(opts.get("api_base") or "").strip() or None,
-            api_key=api_key,
             messages=[
                 {
                     "role": "user",
@@ -120,7 +174,8 @@ class LiteLLMVisionParser(VisionParser):
                     ],
                 }
             ],
-            **self.response_format(model, opts),
+            # Capability lookup needs the real provider/model, not the friendly name.
+            **self.response_format(schema_model, opts),
         )
 
         text = response.choices[0].message.content or "{}"
@@ -129,7 +184,7 @@ class LiteLLMVisionParser(VisionParser):
             input_tokens=getattr(raw_usage, "prompt_tokens", None),
             output_tokens=getattr(raw_usage, "completion_tokens", None),
             cost_usd=_cost_of(response),
-            model=model,
+            model=schema_model,
             requests=1,
         )
         return self.loads(text), usage

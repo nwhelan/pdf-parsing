@@ -86,6 +86,33 @@ negotiated per model: strict `json_schema` where it's supported, `json_object`
 where it isn't, prompt-only for the rest — so a model that can't do schemas
 degrades instead of failing the run.
 
+**Already run a LiteLLM proxy?** Its `config.yaml` already holds your models,
+their deployments and their credentials, so the parser reads it rather than
+asking you to retype any of it:
+
+```yaml
+model_list:
+  - model_name: statement-ocr
+    litellm_params:
+      model: azure_ai/mistral-document-ai-2512
+      api_base: https://my-resource.services.ai.azure.com
+      api_key: os.environ/AZURE_AI_API_KEY
+      api_version: "2026-01-01"
+```
+
+```bash
+pdfplay run <doc_id> -p litellm --opt model=statement-ocr
+```
+
+Set `model` to a `model_name` from the file and its endpoint, credentials and
+real model string come with it. The config is found via the `config_path`
+option, then `$PDFPLAY_LITELLM_CONFIG` / `$LITELLM_CONFIG_PATH`, then
+`./litellm.config.yaml` and `./config.yaml`. Configured names appear as
+suggestions on the `model` field in the viewer, and the field stays free text —
+a raw `provider/model` string still works. Anything you set explicitly
+(`api_base`, `api_key_env`) overrides the file, and `os.environ/NAME` keys are
+resolved per call, never stored in a result, a preset or a cache key.
+
 **One base URL, via the OpenAI protocol.** The `openai-compatible` parser is the
 Chat Completions adapter with the vendor defaults removed:
 
@@ -303,6 +330,52 @@ When you *do* have labels, `score_against_ledger()` gives precision / recall /
 F1 against a known ledger, matching on amount + date and scoring descriptions
 separately so one bad row isn't punished twice.
 
+### Golden sets for extraction
+
+The ledger scorer is specific to statements. For structured extraction there's a
+document-class-agnostic one: store the right answer for a document, and every
+parser's `extraction` is scored against it field by field.
+
+```bash
+pdfplay golden <doc_id> --set golden.json     # the known-correct answer
+pdfplay run <doc_id> -p claude -p litellm --opt extraction_schema="$SCHEMA"
+pdfplay score <doc_id>                        # adds an extraction table
+pdfplay score <doc_id> --fields               # every field, expected vs got
+```
+
+```
+parser        fields  right    acc      P      R     F1
+claude             6      6   1.00   1.00   1.00   1.00
+litellm            6      4   0.67   0.80   0.67   0.73
+
+litellm
+  ✓ account_number                   want='0042-118-9' got='0042-118-9'
+  ✓ closing_balance                  want=5078.59 got='$5,078.59'
+  ✗ holder.name                      want='A. Nwosu' got='A Nwoso'
+```
+
+The per-field verdict is the point — a single accuracy number tells you
+something went wrong, not what. Four statuses: `correct`, `wrong` (answered,
+but not right — carrying a similarity so near-misses are visible as such),
+`missing` (didn't answer) and `extra` (answered something the golden doesn't
+mention, which costs precision but not recall). Not answering and answering
+wrongly are deliberately different: a parser that returns nulls everywhere gets
+zero recall rather than perfect precision.
+
+Comparison is by value, not by formatting, because parsers disagree about
+formatting and chasing that is wasted time: `$5,078.59`, `5,078.59` and
+`5078.59` are the same number, `(1,708.14)` is negative, `03/31/2025` and
+`2025-03-31` are the same date, and text is compared ignoring case, spacing and
+punctuation. Nested objects and lists are addressed by path
+(`fees[0].amount`), so a golden set describes whatever shape your schema has.
+
+Vision parsers answer per page and Mistral answers per document; the per-page
+form is merged before scoring — first non-null answer per field wins, and lists
+accumulate — so both are scored against the same golden set.
+
+The golden lives beside any ledger in the document's `ground_truth.json`, and
+the viewer shows the same comparison as a table in the **Extraction** tab.
+
 The synthetic samples ship with their ledgers, so the labelled path works out
 of the box:
 
@@ -338,7 +411,8 @@ pymupdf-layout     34   1.00   1.00   2.75     layout model + OCR fallback
 `pdfplay serve` opens a React app built with [shadcn/ui](https://ui.shadcn.com)
 components on Tailwind v4:
 
-- **Left** — a collapsible `Sidebar` listing parsers grouped local/remote, each
+- **Left** — a resizable, collapsible `Sidebar` listing parsers grouped
+  local/remote, each
   with a checkbox to run it and a tooltip explaining what it does (or why it
   isn't available). Selecting one opens its options below, rendered from the
   adapter's own `Option` declarations — `Switch` for booleans, `Select` for
@@ -353,6 +427,11 @@ components on Tailwind v4:
   Scores render as `Card` sections: generic signals in a `Table`, per-parser
   reconciliation as a `Progress` bar, ground-truth P/R/F1, and the text
   agreement matrix. Run results and failures arrive as toasts.
+
+The sidebar has no fixed width: drag its right edge to resize, click it to
+collapse, double-click to reset, or focus it and use the arrow keys (shift for
+bigger steps). The width persists across reloads. Prompts and JSON schemas live
+in that rail, so it needs to be able to grow.
 
 Dark and light themes both ship; the toggle is in the header.
 
@@ -392,7 +471,8 @@ pdfplay add FILE [--class C] [--ledger L]
 pdfplay docs                       # list documents in the workspace
 pdfplay run DOC_ID (--all | -p parser | --preset name)... [--pages 1,2] [--force] [--opt k=v]
 pdfplay presets [-p parser] [--save NAME --opt k=v] [--delete PRESET_ID]
-pdfplay score DOC_ID [--class bank_statement] [--json]
+pdfplay golden DOC_ID [--set FILE.json]
+pdfplay score DOC_ID [--class bank_statement] [--fields] [--json]
 pdfplay compare DOC_ID -p a -p b   # two-way diff between two parsers
 pdfplay serve [--host H] [--port P]
 ```

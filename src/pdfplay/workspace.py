@@ -286,4 +286,17 @@ class Workspace:
         return read_json(path)
 
     def set_ground_truth(self, doc_id: str, data: dict[str, Any]) -> None:
+        self.ground_truth_path(doc_id).parent.mkdir(parents=True, exist_ok=True)
         write_json(self.ground_truth_path(doc_id), data)
+
+    def get_golden_extraction(self, doc_id: str) -> Any | None:
+        """The known-correct structured answer for this document, if set."""
+        truth = self.get_ground_truth(doc_id)
+        return truth.get("extraction") if isinstance(truth, dict) else None
+
+    def set_golden_extraction(self, doc_id: str, data: Any) -> None:
+        """Store the golden answer beside any ledger, in one file per document."""
+        truth = self.get_ground_truth(doc_id)
+        merged = dict(truth) if isinstance(truth, dict) else {}
+        merged["extraction"] = data
+        self.set_ground_truth(doc_id, merged)

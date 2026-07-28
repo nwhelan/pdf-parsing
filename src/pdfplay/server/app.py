@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .. import registry
-from ..metrics import DOC_CLASSES, bank_statement, generic
+from ..metrics import DOC_CLASSES, bank_statement, extraction, generic
 from ..runner import run_parser
 from ..workspace import Workspace
 
@@ -125,6 +125,19 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
     def get_ground_truth(doc_id: str) -> Any:
         return ws.get_ground_truth(doc_id) or {}
 
+    @app.get("/api/documents/{doc_id}/golden-extraction")
+    def get_golden(doc_id: str) -> Any:
+        return {"extraction": ws.get_golden_extraction(doc_id)}
+
+    @app.put("/api/documents/{doc_id}/golden-extraction")
+    def set_golden(doc_id: str, payload: Any = Body(...)) -> dict[str, bool]:
+        # Accept the golden object itself, or wrapped in {"extraction": ...} so
+        # the round trip through the GET above works unchanged.
+        if isinstance(payload, dict) and set(payload) == {"extraction"}:
+            payload = payload["extraction"]
+        ws.set_golden_extraction(doc_id, payload)
+        return {"ok": True}
+
     # -- runs ------------------------------------------------------------
 
     @app.post("/api/documents/{doc_id}/parse/{parser_id}")
@@ -163,6 +176,7 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
         rows = []
         truth = ws.get_ground_truth(doc_id) or {}
         ledger = truth.get("transactions") if isinstance(truth, dict) else None
+        golden = truth.get("extraction") if isinstance(truth, dict) else None
 
         for key, result in pairs:
             row: dict[str, Any] = {"key": key}
@@ -172,11 +186,14 @@ def create_app(workspace: Workspace | None = None) -> FastAPI:
                 row["bank_statement"] = report.as_dict()
                 if ledger:
                     row["ledger_score"] = bank_statement.score_against_ledger(result, ledger)
+            if golden is not None:
+                row["extraction_score"] = extraction.score_against_golden(result.extraction, golden)
             rows.append(row)
 
         return {
             "doc_class": doc_class,
             "known_classes": sorted(DOC_CLASSES),
+            "has_golden_extraction": golden is not None,
             "rows": rows,
             "similarity": generic.similarity_matrix(results),
         }

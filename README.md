@@ -49,13 +49,12 @@ away.
 | `gemini` | remote (extra) | Same contract, using Gemini's native `[ymin,xmin,ymax,xmax]` box convention. |
 | `mistral-ocr-3` | remote (extra) | Document-level OCR API: Markdown per page including tables. Endpoint is pluggable — Mistral, Azure AI Foundry, Vertex, or a gateway. |
 | `mistral-ocr-4` | remote (extra) | The same adapter on the newer model, registered separately so the two generations can run side by side. |
-| `openai-compatible` | remote (extra) | The Chat Completions adapter with no vendor assumptions. Point `base_url` at a LiteLLM proxy, vLLM, Ollama, OpenRouter, Together or Mistral. |
-| `litellm` | remote (extra) | Any vision model litellm can reach, named `provider/model`. Adding a model to the comparison is a string, not a new adapter. |
+| `openai-compatible` | remote (extra) | The Chat Completions adapter with no vendor assumptions. Point `base_url` at Azure OpenAI, a LiteLLM proxy, vLLM, Ollama, OpenRouter, Together or Mistral. |
 
 Install the optional ones as needed:
 
 ```bash
-uv pip install -e '.[litellm]'      # also: layout, docling, unstructured, ocr, anthropic, openai, gemini, mistral, vision
+uv pip install -e '.[openai]'       # also: layout, docling, unstructured, ocr, anthropic, gemini, mistral, vision
 ```
 
 Remote parsers read their credentials from the environment
@@ -67,69 +66,64 @@ Nothing is ever sent anywhere unless you explicitly run a remote parser.
 
 Every remote model here is served from more than one place, and which place you
 use is a property of your account, not of the model. So endpoints are options
-rather than constants, and there are two ways to reach one that isn't the
-vendor's default.
+rather than constants.
 
-**One model string, via litellm.** The `litellm` parser takes `provider/model`
-and handles routing, credentials and pricing:
-
-```bash
-uv pip install -e '.[litellm]'
-pdfplay run <doc_id> -p litellm --opt model=anthropic/claude-sonnet-4-5
-pdfplay run <doc_id> -p litellm --opt model=gemini/gemini-2.5-pro
-pdfplay run <doc_id> -p litellm --opt model=ollama/llama3.2-vision --opt api_base=http://localhost:11434
-```
-
-Credentials come from each provider's usual env var, and the cost column is
-litellm's computed number rather than an estimate. Structured output is
-negotiated per model: strict `json_schema` where it's supported, `json_object`
-where it isn't, prompt-only for the rest — so a model that can't do schemas
-degrades instead of failing the run.
-
-**Already run a LiteLLM proxy?** Its `config.yaml` already holds your models,
-their deployments and their credentials, so the parser reads it rather than
-asking you to retype any of it:
-
-```yaml
-model_list:
-  - model_name: statement-ocr
-    litellm_params:
-      model: azure_ai/mistral-document-ai-2512
-      api_base: https://my-resource.services.ai.azure.com
-      api_key: os.environ/AZURE_AI_API_KEY
-      api_version: "2026-01-01"
-```
-
-```bash
-pdfplay run <doc_id> -p litellm --opt model=statement-ocr
-```
-
-Set `model` to a `model_name` from the file and its endpoint, credentials and
-real model string come with it. The config is found via the `config_path`
-option, then `$PDFPLAY_LITELLM_CONFIG` / `$LITELLM_CONFIG_PATH`, then
-`./litellm.config.yaml` and `./config.yaml`. Configured names appear as
-suggestions on the `model` field in the viewer, and the field stays free text —
-a raw `provider/model` string still works. Anything you set explicitly
-(`api_base`, `api_key_env`) overrides the file, and `os.environ/NAME` keys are
-resolved per call, never stored in a result, a preset or a cache key.
-
-**One base URL, via the OpenAI protocol.** The `openai-compatible` parser is the
-Chat Completions adapter with the vendor defaults removed:
+Everything that speaks the Chat Completions protocol goes through the **OpenAI
+SDK** — `OpenAI` for anything serving it, `AzureOpenAI` when an api-version says
+Azure. No routing layer in between, which means one dependency, one client, and
+errors that come back from the provider rather than from a translation of it.
 
 ```bash
 pdfplay run <doc_id> -p openai-compatible \
   --opt base_url=http://localhost:4000/v1 --opt model=my-gateway-model
 ```
 
-That reaches a LiteLLM proxy, vLLM, Ollama, OpenRouter, Together, Fireworks or
-Mistral. Set `api_version` and it switches to the Azure OpenAI client, reading
-`base_url` as the resource endpoint and `model` as a deployment name. Set
-`api_key_env` to name the variable holding the key; a local server that wants no
-key needs nothing. `response_format` drops from `json_schema` to `json_object`
-to `text` for servers that only partly implement structured output.
+That reaches Azure OpenAI, a LiteLLM proxy, vLLM, Ollama, OpenRouter, Together,
+Fireworks or Mistral's chat models. Set `api_version` and it switches to the
+Azure OpenAI client, reading `base_url` as the resource endpoint and `model` as
+a deployment name. `api_key_env` names the variable holding the key; a local
+server that wants no key needs nothing. `response_format` drops from
+`json_schema` to `json_object` to `text` for servers that only partly implement
+structured output.
 
 The stock `openai` parser takes the same options, so pointing *it* somewhere
 else works too — `openai-compatible` exists so both can sit in one comparison.
+
+### Named models from a config.yaml
+
+If you keep a LiteLLM-style config of models and endpoints, the `model` option
+can name an entry in it and the endpoint comes along. The file format is
+LiteLLM's because that is what people already have on disk; reading it needs
+nothing but PyYAML.
+
+```yaml
+model_list:
+  - model_name: statement-vision
+    litellm_params:
+      model: azure/gpt-4.1-deployment
+      api_base: https://my-resource.openai.azure.com
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      api_version: "2026-01-01"
+```
+
+```bash
+pdfplay run <doc_id> -p openai-compatible --opt model=statement-vision
+```
+
+The config is found via the `config_path` option, then `$PDFPLAY_MODEL_CONFIG` /
+`$LITELLM_CONFIG_PATH`, then `./config.yaml`. A `provider/` prefix on the model
+is stripped — the URL already decides who serves it — and `api_version` selects
+the Azure client. Configured names appear as suggestions on the `model` field in
+the viewer, and the field stays free text, so any model id still works. Anything
+set explicitly (`base_url`, `api_key_env`) overrides the file, and
+`os.environ/NAME` keys are resolved per call, never stored in a result, a preset
+or a cache key.
+
+Two things sit outside this. **Mistral OCR** is a document API, not a chat one —
+there is no `/v1/ocr` in the OpenAI protocol and no SDK client that speaks it —
+so those adapters POST directly and keep their own endpoint options. **Claude
+and Gemini** keep their native SDKs, where their own features live; reach them
+over the OpenAI protocol via `openai-compatible` and a gateway if you prefer.
 
 ## Comparing models, not just libraries
 
@@ -156,7 +150,7 @@ SCHEMA='{"type":"object","properties":{
   "account_number":{"type":"string"},
   "closing_balance":{"type":"number"}}}'
 pdfplay run <doc_id> -p claude --opt extraction_schema="$SCHEMA"
-pdfplay run <doc_id> -p litellm --opt model=gemini/gemini-2.5-pro --opt extraction_schema="$SCHEMA"
+pdfplay run <doc_id> -p openai-compatible --opt model=statement-vision --opt extraction_schema="$SCHEMA"
 ```
 
 Mistral OCR has its own native version of this, so it can answer the same
@@ -191,21 +185,17 @@ reconciles. Markdown tables are parsed back into the normalized `Table` model
 (the same code path `pymupdf-layout` uses), so its tables are comparable with
 parsers that expose real cell geometry.
 
-Two transports make the call. With litellm installed, `litellm.ocr` routes it —
-it speaks this exact request shape and already knows `mistral`, `azure_ai` and
-`vertex_ai` — and the cost comes back from its price table. Without litellm, a
-direct `httpx` POST to the resolved URL does the same job. `transport` is
-`auto`, `litellm` or `http`; `auto` prefers litellm and falls back.
+The call is a direct `httpx` POST, since this endpoint is not part of the
+OpenAI protocol and no SDK client speaks it.
 
 | Option | Effect |
 |---|---|
-| `endpoint` | `mistral` (default), `azure`, or `custom`. Picks the URL, the auth scheme, and the litellm provider. |
-| `transport` | `auto` / `litellm` / `http`. |
-| `base_url` | The OCR endpoint. Under litellm this is the base and the path is completed for you. |
+| `endpoint` | `mistral` (default), `azure`, or `custom`. Picks the URL and the auth scheme. |
+| `base_url` | The OCR endpoint. An Azure resource root is completed for you. |
 | `api_key_env` | Env var holding the key. Blank tries `MISTRAL_API_KEY`, `AZURE_AI_API_KEY`, `AZURE_MISTRAL_API_KEY`, `MISTRAL_OCR_API_KEY`. |
-| `auth_header` | HTTP transport only: `auto` sends Bearer to Mistral and `api-key` to Azure. |
-| `api_version` | HTTP transport only: value for the `?api-version=` query parameter. |
-| `model` | Model id, or an Azure *deployment* name. A `provider/model` string is passed to litellm untouched. |
+| `auth_header` | `auto` sends Bearer to Mistral and `api-key` to Azure. Override for gateways. |
+| `api_version` | Azure only: value for the `?api-version=` query parameter. |
+| `model` | Model id, or an Azure *deployment* name. |
 
 Because options are part of the cache key, `mistral-ocr-3` can target an Azure
 Foundry deployment while `mistral-ocr-4` talks to `api.mistral.ai` in the same
@@ -220,9 +210,8 @@ parser ids here are labels and the model strings are what actually gets sent:
 | Azure AI Foundry | `mistral-document-ai-2505`, `mistral-document-ai-2512` |
 | Vertex AI | `mistral-ocr-2505` |
 
-Set `model` to whatever your account exposes. A test asserts the two defaults
-exist in litellm's model table, so a stale id fails the suite rather than the
-first API call.
+Set `model` to whatever your account exposes. A test pins the two defaults to
+that list, so a stale id fails the suite rather than the first API call.
 
 **Data extraction.** Mistral OCR takes a JSON Schema and returns structured
 fields next to the Markdown, which is a different mechanism from prompting a
@@ -254,21 +243,21 @@ export AZURE_AI_API_BASE=https://my-resource.services.ai.azure.com
 export AZURE_AI_API_KEY=...
 pdfplay run <doc_id> -p mistral-ocr-3 \
   --opt endpoint=azure --opt model=mistral-document-ai-2512
-# → azure_ai/mistral-document-ai-2512 via litellm, or
-#   POST https://my-resource.services.ai.azure.com/providers/mistral/azure/ocr
+# → POST https://my-resource.services.ai.azure.com/providers/mistral/azure/ocr
 ```
 
 `AZURE_MISTRAL_ENDPOINT` / `AZURE_MISTRAL_API_KEY` work too; the `AZURE_AI_*`
-names are litellm's own, so a workspace already configured for litellm needs
-nothing extra. Give `base_url` the full URL if your deployment doesn't follow
+names are the conventional Foundry ones, so a workspace already configured for
+it needs nothing extra. Give `base_url` the full URL if your deployment doesn't follow
 that path. In the viewer all of these are ordinary fields in the parser's
 options panel.
 
 > The Mistral hosts are unreachable from the environment this was written in
 > (egress policy returns 403 for `api.mistral.ai` and `docs.mistral.ai`), so
-> none of it was exercised against a live endpoint. The request shape and the
-> model ids were instead checked against litellm's implementation and price
-> table, which is a real cross-check but not the same as a successful call.
+> none of it was exercised against a live endpoint. The request shape, the model
+> ids and the annotation parameters were cross-checked against an independent
+> implementation of the same API, which is real corroboration but not the same
+> as a successful call.
 
 ## The normalized model
 
@@ -338,7 +327,7 @@ parser's `extraction` is scored against it field by field.
 
 ```bash
 pdfplay golden <doc_id> --set golden.json     # the known-correct answer
-pdfplay run <doc_id> -p claude -p litellm --opt extraction_schema="$SCHEMA"
+pdfplay run <doc_id> -p claude -p openai --opt extraction_schema="$SCHEMA"
 pdfplay score <doc_id>                        # adds an extraction table
 pdfplay score <doc_id> --fields               # every field, expected vs got
 ```
@@ -346,9 +335,9 @@ pdfplay score <doc_id> --fields               # every field, expected vs got
 ```
 parser        fields  right    acc      P      R     F1
 claude             6      6   1.00   1.00   1.00   1.00
-litellm            6      4   0.67   0.80   0.67   0.73
+openai             6      4   0.67   0.80   0.67   0.73
 
-litellm
+openai
   ✓ account_number                   want='0042-118-9' got='0042-118-9'
   ✓ closing_balance                  want=5078.59 got='$5,078.59'
   ✗ holder.name                      want='A. Nwosu' got='A Nwoso'
@@ -524,9 +513,10 @@ your options all come for free. For a remote vision model, subclass
 `VisionParser` instead and implement only `call_model` — the prompt, schema,
 rasterization, and box denormalization are shared.
 
-Before writing one, check whether `--opt model=provider/model` on the `litellm`
-parser already reaches it. A new adapter is worth it when the provider has
-something the shared contract can't express; otherwise it's a string.
+Before writing one, check whether the model already speaks the OpenAI protocol —
+`openai-compatible` with a `base_url` and a `model` reaches it without any new
+code. A new adapter is worth it when the provider has something the shared
+contract can't express.
 
 ## Adding a document class
 

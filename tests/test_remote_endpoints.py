@@ -1,9 +1,9 @@
 """Pointing the remote adapters at somewhere other than their vendor.
 
-Two routes to the same place: the OpenAI-compatible adapter, which builds an
-OpenAI SDK client against any base URL, and the litellm adapter, which routes
-by model string. Neither is asked to make a network call here — what's under
-test is the client and the request they would produce.
+Everything reachable over the Chat Completions protocol goes through the OpenAI
+SDK — `OpenAI` for anything speaking it, `AzureOpenAI` when an api-version says
+Azure. No network call is made here; what's under test is the client each set of
+options produces.
 """
 
 from __future__ import annotations
@@ -98,82 +98,29 @@ def test_the_compatible_parser_is_available_without_an_openai_key(monkeypatch):
     assert not registry.get("openai").check_availability().available
 
 
-# -- litellm ----------------------------------------------------------------
+# -- cost -------------------------------------------------------------------
 
 
-class FakeCompletion:
-    def __init__(self) -> None:
-        message = type("M", (), {"content": '{"blocks": [], "markdown": "# hi"}'})()
-        self.choices = [type("C", (), {"message": message})()]
-        self.usage = type("U", (), {"prompt_tokens": 11, "completion_tokens": 22})()
-        self._hidden_params = {"response_cost": 0.0031}
+def test_cost_is_estimated_from_the_price_table():
+    """Without a router computing it, cost comes from a per-model rate here."""
+    parser = OpenAIVisionParser()
+    # gpt-4.1 at $2/$8 per 1M tokens.
+    assert parser.estimate_cost("gpt-4.1", 1_000_000, 1_000_000) == pytest.approx(10.0)
+    assert parser.estimate_cost("gpt-4.1-mini", 1_000_000, 0) == pytest.approx(0.4)
 
 
-@pytest.fixture
-def fake_completion(monkeypatch):
-    litellm = pytest.importorskip("litellm")
-    calls: list[dict[str, Any]] = []
-
-    def completion(**kwargs):
-        calls.append(kwargs)
-        return FakeCompletion()
-
-    monkeypatch.setattr(litellm, "completion", completion)
-    return calls
-
-
-def png() -> bytes:
-    return b"\x89PNG\r\n\x1a\n"
-
-
-def test_the_model_string_is_the_whole_configuration(fake_completion):
-    parser = registry.get("litellm")()
-    payload, usage = parser.call_model(
-        png(), "prompt", parser.resolved_options({"model": "anthropic/claude-sonnet-4-5"})
+def test_the_longest_matching_prefix_wins_regardless_of_table_order():
+    """`gpt-4.1-mini` must be priced as a mini, not at the `gpt-4.1` rate."""
+    parser = OpenAIVisionParser()
+    assert parser.estimate_cost("gpt-4.1-mini", 1_000_000, 0) < parser.estimate_cost(
+        "gpt-4.1", 1_000_000, 0
     )
 
-    assert fake_completion[0]["model"] == "anthropic/claude-sonnet-4-5"
-    assert fake_completion[0]["messages"][0]["content"][0]["image_url"]["url"].startswith(
-        "data:image/png;base64,"
-    )
-    assert payload["markdown"] == "# hi"
-    assert (usage.input_tokens, usage.output_tokens) == (11, 22)
+    class Reordered(OpenAIVisionParser):
+        prices = {"gpt-4.1": (2.0, 8.0), "gpt-4.1-mini": (0.4, 1.6)}
+
+    assert Reordered().estimate_cost("gpt-4.1-mini", 1_000_000, 0) == pytest.approx(0.4)
 
 
-def test_cost_is_taken_from_litellm_rather_than_estimated(fake_completion):
-    parser = registry.get("litellm")()
-    _, usage = parser.call_model(png(), "prompt", parser.resolved_options({"model": "gpt-4.1"}))
-    assert usage.cost_usd == pytest.approx(0.0031)
-
-
-def test_api_base_routes_through_a_gateway(fake_completion, monkeypatch):
-    monkeypatch.setenv("GATEWAY_KEY", "sk-gw")
-    parser = registry.get("litellm")()
-    parser.call_model(
-        png(),
-        "prompt",
-        parser.resolved_options(
-            {"model": "gpt-4.1", "api_base": "http://localhost:4000", "api_key_env": "GATEWAY_KEY"}
-        ),
-    )
-    assert fake_completion[0]["api_base"] == "http://localhost:4000"
-    assert fake_completion[0]["api_key"] == "sk-gw"
-
-
-def test_a_missing_model_says_what_to_set(fake_completion):
-    parser = registry.get("litellm")()
-    with pytest.raises(RuntimeError, match="litellm model string"):
-        parser.call_model(png(), "prompt", parser.resolved_options({}))
-
-
-def test_structured_output_is_dropped_for_models_that_cannot_do_it():
-    parser = registry.get("litellm")()
-    pytest.importorskip("litellm")
-
-    strict = parser.response_format("gpt-4.1", parser.resolved_options({"model": "gpt-4.1"}))
-    assert strict["response_format"]["type"] == "json_schema"
-
-    # Ollama serves chat completions but no response schema; asking anyway is
-    # a 400, so the option degrades instead of failing the run.
-    degraded = parser.response_format("ollama/llava", parser.resolved_options({"model": "ollama/llava"}))
-    assert degraded == {"response_format": {"type": "json_object"}}
+def test_an_unlisted_model_reports_no_cost_rather_than_a_wrong_one():
+    assert OpenAIVisionParser().estimate_cost("some-local-llava", 1_000_000, 1_000_000) is None

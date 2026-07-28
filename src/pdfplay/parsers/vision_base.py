@@ -266,10 +266,16 @@ class VisionParser(PdfParser):
         ).normalized()
 
     def estimate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float | None:
-        for prefix, (in_price, out_price) in self.prices.items():
-            if model.startswith(prefix):
-                return input_tokens / 1e6 * in_price + output_tokens / 1e6 * out_price
-        return None
+        """Price a call from the table, or report nothing rather than a guess.
+
+        The longest matching prefix wins, so `gpt-4.1-mini` is priced as a mini
+        whatever order the table happens to be written in.
+        """
+        matches = [p for p in self.prices if model.startswith(p)]
+        if not matches:
+            return None
+        in_price, out_price = self.prices[max(matches, key=len)]
+        return input_tokens / 1e6 * in_price + output_tokens / 1e6 * out_price
 
     @staticmethod
     def loads(text: str) -> dict[str, Any]:

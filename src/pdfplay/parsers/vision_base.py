@@ -8,6 +8,13 @@ boxes back into PDF points. Only the API call differs, so subclasses implement
 Box convention on the wire: integers in ``[0, 1000]`` relative to the *image*.
 Most models are asked for ``[x0, y0, x1, y1]``; Gemini is asked for its native
 ``[ymin, xmin, ymax, xmax]`` and declares ``bbox_order = "yxyx"``.
+
+Two options make these adapters usable for comparing *models* rather than
+libraries. ``instructions`` edits the prompt — appended to the transcription
+prompt, or replacing it outright — and ``extraction_schema`` takes a JSON Schema
+that is added to the response as an ``extraction`` field. Because both are
+ordinary options they are part of the cache key, so the same page under two
+prompts is two comparable results rather than one overwriting the other.
 """
 
 from __future__ import annotations
@@ -47,6 +54,12 @@ BBOX_HELP_YXYX = (
     "`[ymin, xmin, ymax, xmax]` as integers from 0 to 1000, relative to the image."
 )
 
+EXTRACTION_PROMPT = """
+
+Also return `extraction`: the requested fields pulled from this page, matching
+the provided schema. Copy values verbatim from the page; use null for anything
+the page does not state, and never invent a value."""
+
 JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -84,6 +97,29 @@ class VisionParser(PdfParser):
         Option("max_edge_px", "int", 1600, help="Longest image edge sent to the model."),
         Option("max_output_tokens", "int", 16000),
         Option("include_markdown", "bool", True),
+        Option(
+            "instructions",
+            "text",
+            "",
+            help="Extra instructions for the model. Applied to every page.",
+        ),
+        Option(
+            "instructions_mode",
+            "choice",
+            "append",
+            choices=["append", "replace"],
+            help="'append' adds to the transcription prompt; 'replace' uses your text alone.",
+        ),
+        Option(
+            "extraction_schema",
+            "text",
+            "",
+            help=(
+                "JSON Schema for structured extraction. When set, the model also returns an "
+                "`extraction` object matching it — the same schema across models is what "
+                "makes them comparable."
+            ),
+        ),
     )
 
     # -- subclass hook ---------------------------------------------------
@@ -91,21 +127,61 @@ class VisionParser(PdfParser):
     def call_model(self, png: bytes, prompt: str, opts: dict[str, Any]) -> tuple[dict[str, Any], Usage]:
         raise NotImplementedError
 
+    # -- prompt and schema -----------------------------------------------
+
+    @staticmethod
+    def parse_schema(raw: Any, label: str = "extraction_schema") -> dict[str, Any] | None:
+        """Accept a JSON Schema as either a string or an already-parsed object."""
+        if not raw:
+            return None
+        if isinstance(raw, dict):
+            return raw
+        try:
+            schema = json.loads(str(raw))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{label} is not valid JSON: {exc}") from None
+        if not isinstance(schema, dict):
+            raise RuntimeError(f"{label} must be a JSON object, got {type(schema).__name__}")
+        return schema
+
+    def build_prompt(self, opts: dict[str, Any]) -> str:
+        base = PROMPT.format(
+            kinds=", ".join(f'"{k}"' for k in KINDS),
+            bbox_help=BBOX_HELP_YXYX if self.bbox_order == "yxyx" else BBOX_HELP_XYXY,
+        )
+        if self.parse_schema(opts.get("extraction_schema")) is not None:
+            base += EXTRACTION_PROMPT
+
+        instructions = str(opts.get("instructions") or "").strip()
+        if not instructions:
+            return base
+        if (opts.get("instructions_mode") or "append") == "replace":
+            return instructions
+        return f"{base}\n\n## Additional instructions\n\n{instructions}"
+
+    def build_schema(self, opts: dict[str, Any]) -> dict[str, Any]:
+        """The response schema, widened with the caller's extraction schema."""
+        extraction = self.parse_schema(opts.get("extraction_schema"))
+        if extraction is None:
+            return JSON_SCHEMA
+        schema = json.loads(json.dumps(JSON_SCHEMA))  # don't mutate the shared one
+        schema["properties"]["extraction"] = extraction
+        schema["required"] = [*schema["required"], "extraction"]
+        return schema
+
     # -- driver ----------------------------------------------------------
 
     def parse(self, pdf_path: Path, pages: list[int] | None, options: dict[str, Any]) -> ParsedDocument:
         opts = self.resolved_options(options)
         geometry = page_geometry(pdf_path)
         wanted = select_pages(len(geometry), pages)
-        prompt = PROMPT.format(
-            kinds=", ".join(f'"{k}"' for k in KINDS),
-            bbox_help=BBOX_HELP_YXYX if self.bbox_order == "yxyx" else BBOX_HELP_XYXY,
-        )
+        prompt = self.build_prompt(opts)
 
         out_pages: list[PageResult] = []
         timings: dict[int, float] = {}
         warnings: list[str] = []
         markdown_parts: list[str] = []
+        extractions: dict[int, Any] = {}
         total = Usage(requests=0, input_tokens=0, output_tokens=0, cost_usd=0.0)
 
         for page_no in wanted:
@@ -148,6 +224,9 @@ class VisionParser(PdfParser):
             if page_md:
                 markdown_parts.append(page_md)
             result.meta["markdown"] = page_md
+            if payload.get("extraction") is not None:
+                extractions[page_no] = payload["extraction"]
+                result.meta["extraction"] = payload["extraction"]
 
             timings[page_no] = time.perf_counter() - started
             out_pages.append(result)
@@ -155,6 +234,9 @@ class VisionParser(PdfParser):
         return ParsedDocument(
             pages=out_pages,
             markdown="\n\n---\n\n".join(markdown_parts) if markdown_parts else None,
+            # One request per page, so the document-level extraction is the
+            # per-page ones keyed by page rather than a single object.
+            extraction={"pages": extractions} if extractions else None,
             usage=total,
             warnings=warnings,
             per_page_s=timings,

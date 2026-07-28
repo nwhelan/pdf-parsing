@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from . import registry
-from .metrics import bank_statement, generic
+from .metrics import bank_statement, extraction, generic
 from .models import ParseResult
 from .runner import run_many
-from .workspace import Workspace
+from .workspace import DEFAULT_WORKSPACE, Workspace
 
 
 def _workspace(args: argparse.Namespace) -> Workspace:
@@ -99,7 +99,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     meta = ws.add_document(args.file, doc_class=args.doc_class)
     if args.ledger:
-        ws.set_ground_truth(meta.doc_id, json.loads(Path(args.ledger).read_text()))
+        ws.set_ground_truth(meta.doc_id, json.loads(Path(args.ledger).read_text(encoding="utf-8")))
     print(f"{meta.doc_id}  {meta.name}  {meta.pages} page(s){'  [ledger]' if args.ledger else ''}")
     return 0
 
@@ -120,17 +120,71 @@ def cmd_docs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_presets(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+
+    if args.delete:
+        ws.delete_preset(args.delete)
+        print(f"deleted {args.delete}")
+        return 0
+
+    if args.save:
+        if not args.parser:
+            raise SystemExit("--save needs -p/--parser to say which parser it configures")
+        preset = ws.save_preset(args.save, args.parser[0], _parse_options(args.opt))
+        print(f"{preset.preset_id}  {preset.name}")
+        return 0
+
+    presets = ws.list_presets(args.parser[0] if args.parser else "")
+    if not presets:
+        print("no presets yet — `pdfplay presets --save NAME -p PARSER --opt k=v`")
+        return 0
+    for preset in presets:
+        opts = ", ".join(f"{k}={v}" for k, v in preset.options.items() if v not in ("", None))
+        print(f"{preset.preset_id:<34} {preset.parser_id:<18} {opts[:70]}")
+    return 0
+
+
+def cmd_golden(args: argparse.Namespace) -> int:
+    """Set or show the known-correct extraction for a document."""
+    ws = _workspace(args)
+    doc_id = _resolve_doc(ws, args.doc_id)
+
+    if args.set:
+        data = json.loads(Path(args.set).read_text(encoding="utf-8"))
+        ws.set_golden_extraction(doc_id, data)
+        fields = len(extraction.flatten(data))
+        print(f"golden set for {doc_id}: {fields} field(s)")
+        return 0
+
+    golden = ws.get_golden_extraction(doc_id)
+    if golden is None:
+        print("no golden extraction — `pdfplay golden DOC_ID --set FILE.json`")
+        return 1
+    print(json.dumps(golden, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     doc_id = _resolve_doc(ws, args.doc_id)
+
+    # A preset carries both the parser it configures and its options, so it can
+    # stand in for -p entirely.
+    saved = [ws.get_preset(name) for name in (args.preset or [])]
+
     if args.all:
         parser_ids = [p.id for p in registry.available_parsers()]
     else:
-        parser_ids = args.parser
+        parser_ids = list(dict.fromkeys([*args.parser, *(p.parser_id for p in saved)]))
     if not parser_ids:
-        raise SystemExit("pick parsers with -p/--parser, or use --all")
+        raise SystemExit("pick parsers with -p/--parser or --preset, or use --all")
 
-    options = {pid: _parse_options(args.opt) for pid in parser_ids}
+    # Explicit --opt wins over a preset's stored value.
+    overrides = _parse_options(args.opt)
+    options = {pid: dict(overrides) for pid in parser_ids}
+    for preset in saved:
+        options[preset.parser_id] = {**preset.options, **overrides}
     runs = run_many(
         ws, doc_id, parser_ids, _parse_pages(args.pages), options, force=args.force, max_workers=args.jobs
     )
@@ -144,8 +198,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
 def _rows(ws: Workspace, doc_id: str, doc_class: str) -> list[dict[str, Any]]:
-    ledger = (ws.get_ground_truth(doc_id) or {}).get("transactions")
+    truth = ws.get_ground_truth(doc_id) or {}
+    ledger = truth.get("transactions")
+    golden = truth.get("extraction")
     rows = []
     for meta in ws.list_results(doc_id):
         result: ParseResult | None = ws.load_result(doc_id, meta["key"])
@@ -157,6 +217,8 @@ def _rows(ws: Workspace, doc_id: str, doc_class: str) -> list[dict[str, Any]]:
             row["bank_statement"] = bank_statement.analyze(result).as_dict()
             if ledger:
                 row["ledger_score"] = bank_statement.score_against_ledger(result, ledger)
+        if golden is not None:
+            row["extraction_score"] = extraction.score_against_golden(result.extraction, golden)
         rows.append(row)
     return rows
 
@@ -184,6 +246,27 @@ def cmd_score(args: argparse.Namespace) -> int:
             f"{row['parser_id']:<13} {row['seconds_per_page']:>6.2f} {row['n_chars']:>7} "
             f"{row['n_lines']:>6} {row['page_coverage']:>6} {row['reading_order_score']:>6} {cost:>8}"
         )
+
+    if any(row.get("extraction_score") for row in rows):
+        print(f"\n{'parser':<13} {'fields':>6} {'right':>6} {'acc':>6} {'P':>6} {'R':>6} {'F1':>6}")
+        for row in rows:
+            score = row.get("extraction_score")
+            if not score:
+                continue
+            print(
+                f"{row['parser_id']:<13} {score['n_fields']:>6} {score['n_correct']:>6} "
+                f"{_pct(score['accuracy']):>6} {_pct(score['precision']):>6} "
+                f"{_pct(score['recall']):>6} {_pct(score['f1']):>6}"
+            )
+        if args.fields:
+            for row in rows:
+                score = row.get("extraction_score")
+                if not score:
+                    continue
+                print(f"\n{row['parser_id']}")
+                for field in score["fields"]:
+                    mark = {"correct": "✓", "wrong": "✗", "missing": "-", "extra": "+"}[field["status"]]
+                    print(f"  {mark} {field['path']:<32} want={field['expected']!r} got={field['actual']!r}")
 
     if doc_class == "bank_statement":
         print(f"\n{'parser':<13} {'txns':>5} {'recon':>6} {'amt col':>8} {'bal col':>8} {'totals':>7}")
@@ -257,7 +340,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pdfplay", description=__doc__)
-    parser.add_argument("--workspace", default="workspace", help="workspace directory (default: ./workspace)")
+    parser.add_argument(
+        "--workspace",
+        default=str(DEFAULT_WORKSPACE),
+        help="workspace directory (default: $PDFPLAY_WORKSPACE, else ./workspace)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("list", help="list parsers and availability")
@@ -281,6 +368,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", help="run parsers over a document")
     p.add_argument("doc_id")
     p.add_argument("-p", "--parser", action="append", default=[])
+    p.add_argument(
+        "--preset",
+        action="append",
+        default=[],
+        help="run a saved preset by id or name (repeatable); implies its parser",
+    )
     p.add_argument("--all", action="store_true", help="every available parser")
     p.add_argument("--pages", help="e.g. 1,3 or 1-4")
     p.add_argument("--opt", action="append", help="parser option, key=value (repeatable)")
@@ -288,8 +381,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jobs", type=int, default=4)
     p.set_defaults(func=cmd_run)
 
+    p = sub.add_parser("presets", help="saved parser configurations (models, endpoints, schemas)")
+    p.add_argument("-p", "--parser", action="append", default=[], help="filter, or the parser to save")
+    p.add_argument("--save", metavar="NAME", help="save --opt values under this name")
+    p.add_argument("--opt", action="append", help="parser option, key=value (repeatable)")
+    p.add_argument("--delete", metavar="PRESET_ID")
+    p.set_defaults(func=cmd_presets)
+
+    p = sub.add_parser("golden", help="the known-correct extraction for a document")
+    p.add_argument("doc_id")
+    p.add_argument("--set", metavar="FILE.json", help="store this JSON as the golden answer")
+    p.set_defaults(func=cmd_golden)
+
     p = sub.add_parser("score", help="score every stored result for a document")
     p.add_argument("doc_id")
+    p.add_argument("--fields", action="store_true", help="per-field extraction detail vs the golden set")
     p.add_argument("--class", dest="doc_class", default="", help="override the document class")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_score)
@@ -314,7 +420,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_console() -> None:
+    """Make stdout survive the characters this CLI actually prints.
+
+    A Windows console defaults to the ANSI code page, where the tick and cross
+    below — and any non-Latin-1 character in a parser's output — raise
+    "'charmap' codec can't encode character" *instead of* printing. Nothing here
+    is worth crashing a run over, so unencodable characters degrade to a
+    replacement instead.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # pragma: no cover - redirected stream
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     args = build_parser().parse_args(argv)
     return args.func(args)
 

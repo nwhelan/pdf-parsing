@@ -28,3 +28,16 @@ def scanned(tmp_path_factory):
 @pytest.fixture
 def workspace(tmp_path) -> Workspace:
     return Workspace(tmp_path / "ws")
+
+
+@pytest.fixture
+def client(workspace: Workspace, borderless):
+    """A TestClient over a workspace holding one scored document."""
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    from pdfplay.server.app import create_app
+
+    workspace.add_document(borderless.path, doc_class="bank_statement")
+    workspace.set_ground_truth(
+        workspace.list_documents()[0].doc_id, {"transactions": borderless.ledger["transactions"]}
+    )
+    return fastapi_testclient.TestClient(create_app(workspace))

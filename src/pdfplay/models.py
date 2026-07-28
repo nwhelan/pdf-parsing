@@ -184,6 +184,7 @@ class ParseResult(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     pages: list[PageResult] = Field(default_factory=list)
     markdown: str | None = None
+    extraction: Any | None = None
     usage: Usage = Field(default_factory=Usage)
     warnings: list[str] = Field(default_factory=list)
 
@@ -218,6 +219,10 @@ class ParsedDocument(BaseModel):
 
     pages: list[PageResult] = Field(default_factory=list)
     markdown: str | None = None
+    # Structured output from a data-extraction request: whatever the parser was
+    # asked for by schema, rather than the page as text. Comparable across
+    # parsers precisely because the schema is the same for all of them.
+    extraction: Any | None = None
     usage: Usage = Field(default_factory=Usage)
     warnings: list[str] = Field(default_factory=list)
     per_page_s: dict[int, float] = Field(default_factory=dict)

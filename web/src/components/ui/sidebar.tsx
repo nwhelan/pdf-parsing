@@ -14,10 +14,19 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-const SIDEBAR_WIDTH = "17rem"
+const SIDEBAR_WIDTH_KEY = "pdfplay-sidebar-width"
+const SIDEBAR_WIDTH_DEFAULT = 272
+const SIDEBAR_WIDTH_MIN = 200
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+/** Parser options hold prompts, URLs and JSON schemas, so the rail has to be
+ *  able to grow. The only ceiling is leaving the document itself visible. */
+function clampWidth(px: number) {
+  const ceiling = Math.max(SIDEBAR_WIDTH_MIN, (globalThis.innerWidth || 1600) - 360)
+  return Math.round(Math.min(Math.max(px, SIDEBAR_WIDTH_MIN), ceiling))
+}
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -27,6 +36,9 @@ type SidebarContextProps = {
   setOpenMobile: (open: boolean) => void
   isMobile: boolean
   toggleSidebar: () => void
+  width: number
+  setWidth: (px: number) => void
+  resetWidth: () => void
 }
 
 const SidebarContext = React.createContext<SidebarContextProps | null>(null)
@@ -54,6 +66,22 @@ function SidebarProvider({
   const [openMobile, setOpenMobile] = React.useState(false)
   const [_open, _setOpen] = React.useState(defaultOpen)
   const open = openProp ?? _open
+
+  const [width, _setWidth] = React.useState(() => {
+    const stored = Number(globalThis.localStorage?.getItem(SIDEBAR_WIDTH_KEY))
+    return stored ? clampWidth(stored) : SIDEBAR_WIDTH_DEFAULT
+  })
+
+  const setWidth = React.useCallback((px: number) => {
+    const next = clampWidth(px)
+    _setWidth(next)
+    globalThis.localStorage?.setItem(SIDEBAR_WIDTH_KEY, String(next))
+  }, [])
+
+  const resetWidth = React.useCallback(() => {
+    _setWidth(SIDEBAR_WIDTH_DEFAULT)
+    globalThis.localStorage?.removeItem(SIDEBAR_WIDTH_KEY)
+  }, [])
 
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -83,8 +111,19 @@ function SidebarProvider({
   const state = open ? "expanded" : "collapsed"
 
   const contextValue = React.useMemo<SidebarContextProps>(
-    () => ({ state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar }),
-    [state, open, setOpen, isMobile, openMobile, toggleSidebar]
+    () => ({
+      state,
+      open,
+      setOpen,
+      isMobile,
+      openMobile,
+      setOpenMobile,
+      toggleSidebar,
+      width,
+      setWidth,
+      resetWidth,
+    }),
+    [state, open, setOpen, isMobile, openMobile, toggleSidebar, width, setWidth, resetWidth]
   )
 
   return (
@@ -94,7 +133,7 @@ function SidebarProvider({
           data-slot="sidebar-wrapper"
           style={
             {
-              "--sidebar-width": SIDEBAR_WIDTH,
+              "--sidebar-width": `${width}px`,
               "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
               ...style,
             } as React.CSSProperties
@@ -169,6 +208,7 @@ function Sidebar({
         data-slot="sidebar-gap"
         className={cn(
           "relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear",
+          "group-has-data-[dragging]/sidebar-wrapper:transition-none",
           "group-data-[collapsible=offcanvas]:w-0",
           "group-data-[side=right]:rotate-180",
           variant === "floating" || variant === "inset"
@@ -180,6 +220,7 @@ function Sidebar({
         data-slot="sidebar-container"
         className={cn(
           "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear md:flex",
+          "has-data-[dragging]:transition-none",
           side === "left"
             ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
             : "right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
@@ -224,16 +265,68 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
 }
 
 function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
-  const { toggleSidebar } = useSidebar()
+  const { toggleSidebar, setWidth, resetWidth, width } = useSidebar()
+  const [dragging, setDragging] = React.useState(false)
+
+  // Drag to resize, click to toggle, double-click to reset. The distinction is
+  // whether the pointer actually moved: a click that resized by 2px and
+  // collapsed the rail would be maddening.
+  const onPointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) return
+      const startX = event.clientX
+      const startWidth = width
+      let moved = false
+
+      const onMove = (move: PointerEvent) => {
+        const delta = move.clientX - startX
+        if (!moved && Math.abs(delta) < 3) return
+        moved = true
+        setDragging(true)
+        setWidth(startWidth + delta)
+      }
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        setDragging(false)
+        if (!moved) toggleSidebar()
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+      event.preventDefault()
+    },
+    [width, setWidth, toggleSidebar]
+  )
+
+  // The keyboard equivalent, since a drag handle is not reachable by tab.
+  const onKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      const step = event.shiftKey ? 64 : 16
+      if (event.key === "ArrowLeft") setWidth(width - step)
+      else if (event.key === "ArrowRight") setWidth(width + step)
+      else if (event.key === "Home") resetWidth()
+      else return
+      event.preventDefault()
+    },
+    [width, setWidth, resetWidth]
+  )
+
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
-      tabIndex={-1}
-      onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      data-dragging={dragging || undefined}
+      aria-label="Resize sidebar (click to collapse)"
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+      onDoubleClick={resetWidth}
+      title="Drag to resize · click to collapse · double-click to reset"
       className={cn(
+        "data-[dragging]:after:bg-sidebar-primary",
         "hover:after:bg-sidebar-border absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] sm:flex",
         "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",
         "[[data-side=left][data-state=collapsed]_&]:cursor-e-resize [[data-side=right][data-state=collapsed]_&]:cursor-w-resize",

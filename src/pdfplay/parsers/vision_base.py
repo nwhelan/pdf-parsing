@@ -83,6 +83,24 @@ JSON_SCHEMA: dict[str, Any] = {
 }
 
 
+def _not_json(raw: str, exc: json.JSONDecodeError) -> str:
+    """Explain a non-JSON reply in terms of what the model actually did."""
+    body = raw.strip()
+    if not body:
+        return "the model returned an empty response"
+
+    looks_truncated = exc.msg.startswith("Expecting") and exc.pos >= len(body.rstrip()) - 2
+    if looks_truncated and body.lstrip().startswith(("{", "[")):
+        reason = "the reply is cut off, which usually means it hit max_output_tokens"
+    elif not body.lstrip().startswith(("{", "[", "```")):
+        reason = "the model answered in prose rather than JSON — a refusal or a content filter"
+    else:
+        reason = f"invalid JSON ({exc.msg})"
+
+    excerpt = body[:300] + ("…" if len(body) > 300 else "")
+    return f"{reason}. It said: {excerpt!r}"
+
+
 class VisionParser(PdfParser):
     """Base class for one-image-per-page multimodal parsers."""
 
@@ -239,7 +257,7 @@ class VisionParser(PdfParser):
             # per-page ones keyed by page rather than a single object.
             extraction={"pages": extractions} if extractions else None,
             usage=total,
-            warnings=warnings,
+            warnings=warnings + self.parse_warnings,
             per_page_s=timings,
         )
 
@@ -275,15 +293,26 @@ class VisionParser(PdfParser):
         matches = [p for p in self.prices if model.startswith(p)]
         if not matches:
             return None
+        # Plenty of OpenAI-compatible servers omit `usage` entirely.
+        input_tokens, output_tokens = input_tokens or 0, output_tokens or 0
         in_price, out_price = self.prices[max(matches, key=len)]
         return input_tokens / 1e6 * in_price + output_tokens / 1e6 * out_price
 
     @staticmethod
     def loads(text: str) -> dict[str, Any]:
-        """Parse a JSON payload, tolerating a stray ```json fence."""
+        """Parse a JSON payload, tolerating a stray ```json fence.
+
+        When it isn't JSON, say what came back instead. A model that refuses, a
+        content filter, or an answer cut off at the token limit all arrive here,
+        and `Expecting value: line 1 column 1` describes none of them.
+        """
+        raw = text
         text = text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]
             if text.rstrip().endswith("```"):
                 text = text.rstrip()[:-3]
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(_not_json(raw, exc)) from None

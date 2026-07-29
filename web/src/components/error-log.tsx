@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Check, ChevronRight, Copy, TriangleAlert } from "lucide-react"
+import { Check, ChevronRight, Copy, Lightbulb, TriangleAlert } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
 export interface RunError {
@@ -55,7 +54,7 @@ function CopyButton({ value, label = "Copy" }: { value: unknown; label?: string 
 
 function Block({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1">
+    <div className="min-w-0 space-y-1">
       <p className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">{title}</p>
       {children}
     </div>
@@ -66,8 +65,14 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
 function ErrorEntry({ error, defaultOpen }: { error: RunError; defaultOpen: boolean }) {
   const [open, setOpen] = React.useState(defaultOpen)
 
+  // Adapters attach these to a recorded request when the configuration looks
+  // like something the API will refuse.
+  const hints = error.debug.flatMap((event) =>
+    Array.isArray((event as { hints?: unknown }).hints) ? ((event as { hints: string[] }).hints) : []
+  )
+
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-md border">
+    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border">
       <CollapsibleTrigger className="hover:bg-muted/50 flex w-full items-start gap-2 rounded-md p-2.5 text-left">
         <ChevronRight
           className={cn("text-muted-foreground mt-0.5 size-3.5 shrink-0 transition-transform", open && "rotate-90")}
@@ -81,7 +86,20 @@ function ErrorEntry({ error, defaultOpen }: { error: RunError; defaultOpen: bool
         </div>
       </CollapsibleTrigger>
 
-      <CollapsibleContent className="space-y-3 border-t p-2.5">
+      <CollapsibleContent className="min-w-0 space-y-3 border-t p-2.5">
+        {/* Hints first: the API's own message rarely says which convention it
+            expected, and this is the part you can act on. */}
+        {hints.length > 0 && (
+          <div className="min-w-0 space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            {hints.map((hint, i) => (
+              <p key={i} className="flex min-w-0 gap-1.5 text-xs break-words">
+                <Lightbulb className="mt-0.5 size-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span>{hint}</span>
+              </p>
+            ))}
+          </div>
+        )}
+
         <Block title="Error">
           <pre className="bg-muted text-destructive overflow-x-auto rounded p-2 font-mono text-[11px] whitespace-pre-wrap">
             {error.message}
@@ -90,7 +108,7 @@ function ErrorEntry({ error, defaultOpen }: { error: RunError; defaultOpen: bool
 
         {error.debug.length > 0 ? (
           <Block title={`Request sent (${error.debug.length} step${error.debug.length > 1 ? "s" : ""})`}>
-            <pre className="bg-muted max-h-72 overflow-auto rounded p-2 font-mono text-[11px] whitespace-pre">
+            <pre className="bg-muted max-h-72 overflow-y-auto rounded p-2 font-mono text-[11px] break-words whitespace-pre-wrap">
               {JSON.stringify(error.debug, null, 2)}
             </pre>
           </Block>
@@ -104,7 +122,7 @@ function ErrorEntry({ error, defaultOpen }: { error: RunError; defaultOpen: bool
 
         {error.detail.length > 0 && (
           <Block title="Traceback">
-            <pre className="bg-muted text-muted-foreground max-h-48 overflow-auto rounded p-2 font-mono text-[10px] whitespace-pre">
+            <pre className="bg-muted text-muted-foreground max-h-48 overflow-y-auto rounded p-2 font-mono text-[10px] break-words whitespace-pre-wrap">
               {error.detail.join("\n")}
             </pre>
           </Block>
@@ -138,7 +156,7 @@ export function ErrorLogButton({
 export function ErrorLog({ errors, open, onOpenChange, onClear }: Props) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[80vh] sm:max-w-3xl">
+      <DialogContent className="max-h-[80vh] overflow-hidden sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <TriangleAlert className="text-destructive size-4" />
@@ -150,8 +168,8 @@ export function ErrorLog({ errors, open, onOpenChange, onClear }: Props) {
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[55vh] pr-3">
-          <div className="space-y-2">
+        <div className="max-h-[55vh] min-w-0 overflow-y-auto pr-3">
+          <div className="min-w-0 space-y-2">
             {errors.length === 0 ? (
               <p className="text-muted-foreground py-6 text-center text-sm">Nothing has failed.</p>
             ) : (
@@ -160,7 +178,7 @@ export function ErrorLog({ errors, open, onOpenChange, onClear }: Props) {
               ))
             )}
           </div>
-        </ScrollArea>
+        </div>
 
         <div className="flex items-center justify-between border-t pt-3">
           <CopyButton value={errors} label="Copy all failures" />

@@ -81,7 +81,13 @@ pdfplay run <doc_id> -p openai-compatible \
 That reaches Azure OpenAI, a LiteLLM proxy, vLLM, Ollama, OpenRouter, Together,
 Fireworks or Mistral's chat models. Set `api_version` and it switches to the
 Azure OpenAI client, reading `base_url` as the resource endpoint and `model` as
-a deployment name. `api_key_env` names the variable holding the key; a local
+a deployment name; without it the plain client is used, and an Azure resource
+URL then needs to end in `/openai/v1`.
+
+The token limit is sent as `max_completion_tokens` for GPT-5 and the o-series
+and as `max_tokens` for everything else. An Azure deployment can be named
+anything, so if the API rejects one spelling the call is retried once with the
+other rather than making it your problem — `token_param` forces either. `api_key_env` names the variable holding the key; a local
 server that wants no key needs nothing. `response_format` drops from
 `json_schema` to `json_object` to `text` for servers that only partly implement
 structured output.
@@ -196,6 +202,14 @@ OpenAI protocol and no SDK client speaks it.
 | `auth_header` | `auto` sends Bearer to Mistral and `api-key` to Azure. Override for gateways. |
 | `api_version` | Azure only: value for the `?api-version=` query parameter. |
 | `model` | Model id, or an Azure *deployment* name. |
+
+Foundry serves OCR under two conventions depending on how the model was
+deployed, and the path follows the hostname: `*.models.ai.azure.com` (serverless)
+gets `/v1/ocr`, an AI Services resource gets `/providers/mistral/azure/ocr`. A
+bare hostname is completed either way — posting a document to a host root is
+never what was meant. A URL that already has a path is left alone, since it may
+point at a gateway. Note that `*.openai.azure.com` is Azure **OpenAI**, which
+does not serve Mistral OCR at all.
 
 Because options are part of the cache key, `mistral-ocr-3` can target an Azure
 Foundry deployment while `mistral-ocr-4` talks to `api.mistral.ai` in the same
@@ -433,24 +447,58 @@ on the scores pane. Failed results are stored like any other, so the log is
 seeded from them on reload — a failure from yesterday is still inspectable.
 
 Each entry carries **the request that preceded it**, which is usually the only
-way to read the error:
+way to read the error. `wire` is exactly what goes to the API; everything about
+how it was decided lives under `context`, so the two can't be confused:
 
 ```json
 {
   "event": "chat.completions.create",
-  "client": "AzureOpenAI",
-  "model": "claude-sonnet-5",
-  "base_url": "https://my-resource.openai.azure.com",
-  "api_version": "2026-01-01",
-  "model_source": "option",
-  "image_bytes": 652538,
-  "prompt_chars": 899,
-  "request": { "model": "…", "messages": [{"role": "user", "content": ["image_url", "text"]}] }
+  "wire": {
+    "model": "gpt-5.2",
+    "max_completion_tokens": 16000,
+    "messages": [{ "role": "user", "content": ["image_url", "text"] }]
+  },
+  "context": {
+    "client": "OpenAI",
+    "base_url": "https://my-resource.openai.azure.com",
+    "api_version": null,
+    "model_source": "option",
+    "token_param": "max_completion_tokens",
+    "image_bytes": 652538
+  },
+  "hints": [
+    "my-resource.openai.azure.com is an Azure OpenAI resource, and without api_version the plain OpenAI client is used — that needs base_url to end in /openai/v1."
+  ]
 }
 ```
 
-`DeploymentNotFound: claude-sonnet-5` is a different problem depending on
-whether `model_source` says `option` or `config.yaml`, and a 400 asking for a
+### Failures that don't look like failures
+
+A remote call goes wrong in more ways than raising. These are all handled
+explicitly, because each one used to look like something else:
+
+| What happens | What you used to see | What you see now |
+|---|---|---|
+| Prompt hits a content filter | `IndexError: list index out of range` | "no choices — the prompt was rejected by a content filter" |
+| Answer cut off with no content | a page that parsed to nothing | "cut off before any content — raise max_output_tokens, or lower max_edge_px" |
+| Answer truncated but parseable | a short page, scored as a bad parser | the content, plus a warning that the page is incomplete |
+| Model replies in prose | `Expecting value: line 1 column 1` | "the model answered in prose rather than JSON — a refusal or a content filter", quoting it |
+| A proxy returns a 200 error page | `'list' object has no attribute 'get'` | "…answered with list, not an OCR response", quoting the body |
+| One malformed page in twenty | the whole run fails | that page is skipped with a warning; the rest parse |
+| A page selection that matches nothing | an empty request, billed | "no such page: [5] requested, but the document has 2 pages" — before the call |
+
+The silent ones matter most in a comparison: a parser that "succeeded" with no
+content scores like a bad parser rather than a misconfigured call, and the
+conclusion you draw is wrong.
+
+**`hints`** name configurations that will fail before the API refuses them,
+because a 404 rarely says which of several conventions was expected: an Azure
+OpenAI resource root used without an api-version, Mistral OCR pointed at an
+Azure *OpenAI* host (which doesn't serve it at all), a URL with no path, or a
+`mistral-ocr-*` id where Foundry wants a deployment name.
+
+`DeploymentNotFound` is a different problem depending on whether `model_source`
+says `option` or `config.yaml`, and a 400 asking for a
 `document_annotation_prompt` is only readable next to the payload that omitted
 it. Adapters record before they call, so the request survives the failure.
 
@@ -458,9 +506,16 @@ Turn on a parser's **`debug`** option and the log also keeps the full prompt, th
 image data URL and the raw response body — the whole request as sent, for when
 the shape itself is in question. Off by default because the bodies are large.
 
-Credentials never reach the log: anything whose key looks like a secret is
-masked, and long values (a base64 PDF, an image) are truncated to their shape.
-The log is part of the stored result, so it's in the JSON tab too.
+Credentials never reach the log. Keys that look like secrets are masked, and so
+are credentials carried *inside* values — a key in a URL query parameter, basic
+auth in a host, a bearer token quoted in a message — since matching on key names
+alone would miss all three. Long values (a base64 PDF, an image) are truncated to
+their shape, and anything that isn't JSON-serializable becomes its repr, so a log
+entry can never fail the save of the result it belongs to.
+
+The log is part of the stored result, so it's in the JSON tab too. If caching a
+result fails — a full disk, say — the run is still returned with a warning
+rather than thrown away; the API call was already paid for.
 
 If the viewer says **"Could not load parsers: failed to fetch"**, the page
 reached the static bundle but not the API. It retries five times over about six

@@ -80,6 +80,21 @@ def test_api_version_switches_to_the_azure_client():
         )
 
 
+def test_a_pasted_foundry_path_does_not_double_up_on_azure():
+    """The portal shows endpoints ending in /openai/v1; the Azure client adds
+    /openai/... itself, so the suffix must be stripped or every call 404s."""
+    pytest.importorskip("openai")
+    client = OpenAICompatibleParser.build_client(
+        opts(
+            OpenAICompatibleParser,
+            base_url="https://my-resource.openai.azure.com/openai/v1/",
+            api_version="2026-01-01",
+        ),
+        env={"OPENAI_API_KEY": "sk-a"},
+    )
+    assert "/openai/v1/openai" not in str(client.base_url)
+
+
 def test_response_format_can_be_lowered_for_servers_that_reject_schemas():
     strict = OpenAIVisionParser.response_format(opts(OpenAIVisionParser))
     assert strict["response_format"]["type"] == "json_schema"
@@ -91,11 +106,13 @@ def test_response_format_can_be_lowered_for_servers_that_reject_schemas():
     assert OpenAIVisionParser.response_format(opts(OpenAIVisionParser, response_format="text")) == {}
 
 
-def test_the_compatible_parser_is_available_without_an_openai_key(monkeypatch):
+def test_both_openai_parsers_are_available_without_an_openai_key(monkeypatch):
+    """The key can come from api_key_env or config.yaml, so no env-var gate —
+    settings() raises a precise error at run time when none is found."""
     pytest.importorskip("openai")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert registry.get("openai-compatible").check_availability().available
-    assert not registry.get("openai").check_availability().available
+    assert registry.get("openai").check_availability().available
 
 
 # -- cost -------------------------------------------------------------------

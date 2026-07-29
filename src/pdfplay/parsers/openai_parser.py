@@ -116,7 +116,9 @@ class OpenAIVisionParser(VisionParser):
     )
     homepage = "https://platform.openai.com/docs/guides/vision"
     requires = ("openai",)
-    env_vars = ("OPENAI_API_KEY",)
+    # No env_vars gate: the key can come from api_key_env or config.yaml, and
+    # settings() raises a precise error when none is found.
+    env_vars = ()
     extra = "openai"
     cost_hint = "billed per request; see OpenAI pricing for the chosen model"
     default_model = DEFAULT_MODEL
@@ -246,8 +248,14 @@ class OpenAIVisionParser(VisionParser):
         if settings["api_version"]:
             if not settings["base_url"]:
                 raise RuntimeError("Azure OpenAI needs base_url set to the resource endpoint")
+            # The Azure client appends /openai/... itself; a pasted Foundry URL
+            # already ends in /openai/v1 and would double the path into a 404.
+            endpoint = settings["base_url"].rstrip("/")
+            for suffix in ("/openai/v1", "/openai"):
+                if endpoint.endswith(suffix):
+                    endpoint = endpoint[: -len(suffix)]
             return AzureOpenAI(
-                azure_endpoint=settings["base_url"],
+                azure_endpoint=endpoint,
                 api_version=settings["api_version"],
                 api_key=settings["api_key"],
             )

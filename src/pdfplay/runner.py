@@ -34,7 +34,10 @@ def run_parser(
 
     if not force:
         cached = workspace.load_result(doc_id, key)
-        if cached is not None:
+        # Only successes are worth replaying: an error's cause is usually
+        # outside the options hash (env var, config.yaml, the endpoint itself),
+        # so a rerun must actually retry.
+        if cached is not None and cached.status == "ok":
             return cached, key, True
 
     meta = workspace.get_document(doc_id)

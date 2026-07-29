@@ -45,6 +45,22 @@ def test_a_broken_parser_is_captured_not_raised(workspace: Workspace, borderless
     assert "boom" in result.error
 
 
+def test_a_cached_error_is_retried_not_replayed(workspace: Workspace, borderless, monkeypatch):
+    """The cause of a failure usually lives outside the options hash (an env
+    var, config.yaml, the endpoint itself), so a rerun must actually retry."""
+    from pdfplay import registry
+
+    cls = registry.get("pymupdf")
+    monkeypatch.setattr(cls, "parse", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    meta = workspace.add_document(borderless.path)
+    _, key, _ = run_parser(workspace, meta.doc_id, "pymupdf")
+
+    monkeypatch.undo()
+    result, same_key, cached = run_parser(workspace, meta.doc_id, "pymupdf")
+    assert (same_key, cached) == (key, False)
+    assert result.status == "ok"
+
+
 def test_unknown_parser_raises(workspace: Workspace, borderless):
     meta = workspace.add_document(borderless.path)
     with pytest.raises(KeyError):

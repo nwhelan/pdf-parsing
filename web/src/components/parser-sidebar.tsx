@@ -309,17 +309,21 @@ export function ParserSidebar({
                                 type={opt.type === "str" ? "text" : "number"}
                                 step={opt.type === "int" ? 1 : "any"}
                                 value={String(value ?? "")}
-                                onChange={(e) =>
-                                  onOptionChange(
-                                    current.id,
-                                    opt.name,
+                                onChange={(e) => {
+                                  // A cleared number field parses to NaN, which
+                                  // serializes as null and breaks the parser.
+                                  const parsed =
                                     opt.type === "int"
                                       ? Number.parseInt(e.target.value, 10)
                                       : opt.type === "float"
                                         ? Number.parseFloat(e.target.value)
                                         : e.target.value
+                                  onOptionChange(
+                                    current.id,
+                                    opt.name,
+                                    typeof parsed === "number" && Number.isNaN(parsed) ? opt.default : parsed
                                   )
-                                }
+                                }}
                               />
                             )}
                           </div>

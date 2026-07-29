@@ -151,6 +151,50 @@ def normalize(extraction: Any) -> Any:
     return merged
 
 
+def _align_lists(predicted: Any, golden: Any, tolerance: float) -> Any:
+    """Reorder list items in ``predicted`` to match ``golden`` by content.
+
+    Extraction lists — transactions, line items, fees — carry no promise about
+    order, and two parsers commonly return the same rows in different
+    sequences. Compared by position that scores zero, which is a lie about the
+    extraction and sends you chasing a problem that isn't there. Items are
+    paired by how many leaf values they agree on, greedily, best match first.
+
+    Only lists of *objects* are realigned. In a list of scalars the position is
+    usually the meaning — a bbox is ``[x0, y0, x1, y1]``, and `[4, 3, 2, 1]` is
+    a different box, not the same one shuffled.
+    """
+    if isinstance(golden, dict) and isinstance(predicted, dict):
+        return {k: _align_lists(predicted.get(k), v, tolerance) for k, v in golden.items()} | {
+            k: v for k, v in predicted.items() if k not in golden
+        }
+    if not (isinstance(golden, list) and isinstance(predicted, list)) or len(golden) < 2:
+        return predicted
+    if not all(isinstance(item, dict) for item in golden):
+        return predicted
+
+    remaining = list(range(len(predicted)))
+    aligned: list[Any] = []
+    for want in golden:
+        if not remaining:
+            aligned.append(None)
+            continue
+        best = max(remaining, key=lambda i: (_agreement(want, predicted[i], tolerance), -i))
+        remaining.remove(best)
+        aligned.append(_align_lists(predicted[best], want, tolerance))
+    # Anything unmatched is still surplus, and still costs precision.
+    return aligned + [predicted[i] for i in remaining]
+
+
+def _agreement(want: Any, got: Any, tolerance: float) -> float:
+    """Fraction of the golden item's leaf values that this candidate matches."""
+    expected = flatten(want)
+    if not expected:
+        return 1.0 if want == got else 0.0
+    actual = flatten(got)
+    return sum(values_match(v, actual.get(k), tolerance) for k, v in expected.items()) / len(expected)
+
+
 def score_against_golden(
     extraction: Any, golden: Any, tolerance: float = 0.011
 ) -> dict[str, Any]:
@@ -161,7 +205,10 @@ def score_against_golden(
     said, how much was right?) — so a parser that returns null everywhere
     scores zero recall rather than perfect precision.
     """
-    predicted = flatten(normalize(extraction)) if extraction is not None else {}
+    normalized = normalize(extraction)
+    if golden is not None and normalized is not None:
+        normalized = _align_lists(normalized, golden, tolerance)
+    predicted = flatten(normalized) if extraction is not None else {}
     expected = flatten(golden) if golden is not None else {}
 
     fields: list[dict[str, Any]] = []

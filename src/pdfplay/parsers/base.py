@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,8 @@ class Option:
 
 
 # Anything that looks like a credential, wherever it turns up in a header or a
-# request body. Debug output is written to disk and read in a browser.
+# request body. Debug output is written to disk, rendered in a browser and
+# copied to a clipboard, so it has to be safe to hand to someone else.
 #
 # Matched as whole names or as a suffix, not as a substring: `token_param` and
 # `max_completion_tokens` are parameter names worth reading, and a redactor that
@@ -80,26 +82,58 @@ SECRET_NAMES = frozenset(
 )
 SECRET_SUFFIXES = ("_key", "_token", "_secret", "_password", "_credentials")
 
+# Credentials also travel *inside* values: gateways and Azure accept a key as a
+# query parameter, and a URL can carry basic-auth. Keys alone would miss those.
+SECRET_QUERY_PARAMS = ("key", "token", "secret", "password", "sig", "signature", "code")
+_QUERY_SECRET = re.compile(
+    r"([?&](?:[\w-]*(?:" + "|".join(SECRET_QUERY_PARAMS) + r"))=)([^&\s]+)", re.IGNORECASE
+)
+_BASIC_AUTH = re.compile(r"(://)([^/@\s:]+):([^/@\s]+)@")
+_BEARER = re.compile(r"\b(bearer\s+)(\S+)", re.IGNORECASE)
 
-def is_secret(key: str) -> bool:
-    name = key.lower().replace("-", "_")
-    return name in SECRET_NAMES or name.endswith(SECRET_SUFFIXES)
 # Long values are almost always a base64 document or an image; the shape is the
 # useful part, not the megabyte.
 MAX_DEBUG_VALUE = 600
 
+MASK = "<redacted>"
+
+
+def is_secret(key: str) -> bool:
+    name = key.lower().replace("-", "_")
+    return name in SECRET_NAMES or name.endswith(SECRET_SUFFIXES)
+
+
+def scrub(text: str) -> str:
+    """Mask credentials carried inside a string, not just under a telling key."""
+    text = _QUERY_SECRET.sub(lambda m: m.group(1) + MASK, text)
+    text = _BASIC_AUTH.sub(lambda m: f"{m.group(1)}{m.group(2)}:{MASK}@", text)
+    return _BEARER.sub(lambda m: m.group(1) + MASK, text)
+
 
 def redact(value: Any, key: str = "") -> Any:
-    """Copy a request structure with secrets masked and bulk values truncated."""
+    """Copy a request structure so it is safe to store, show and share.
+
+    Three jobs, and the third is not about secrecy: whatever comes back must be
+    JSON-serializable, because this ends up inside a stored result. A value that
+    cannot be serialized would otherwise fail the *save* — losing a result whose
+    API call has already been paid for — so anything exotic becomes its repr.
+    """
     if is_secret(key) and isinstance(value, str) and value:
         return f"<{len(value)} chars redacted>"
     if isinstance(value, dict):
-        return {k: redact(v, k) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+        return {str(k): redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
         return [redact(v, key) for v in value]
-    if isinstance(value, str) and len(value) > MAX_DEBUG_VALUE:
-        return f"{value[:MAX_DEBUG_VALUE]}… (+{len(value) - MAX_DEBUG_VALUE} chars)"
-    return value
+    if isinstance(value, str):
+        value = scrub(value)
+        if len(value) > MAX_DEBUG_VALUE:
+            return f"{value[:MAX_DEBUG_VALUE]}… (+{len(value) - MAX_DEBUG_VALUE} chars)"
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    # Bytes, SDK objects, dates: keep something readable rather than risking the
+    # whole result on a serializer that has never seen it.
+    return redact(f"<{type(value).__name__}: {value!r}>"[:MAX_DEBUG_VALUE])
 
 
 class PdfParser:
@@ -143,6 +177,17 @@ class PdfParser:
     def record_request(self, label: str, **fields: Any) -> None:
         """Record one outgoing request, redacted and truncated."""
         self.debug_events.append({"event": label, **{k: redact(v, k) for k, v in fields.items()}})
+
+    @property
+    def parse_warnings(self) -> list[str]:
+        """Notes for the user that don't stop the run — drained into the result."""
+        if not hasattr(self, "_parse_warnings"):
+            self._parse_warnings: list[str] = []
+        return self._parse_warnings
+
+    def note_warning(self, text: str) -> None:
+        if text not in self.parse_warnings:
+            self.parse_warnings.append(text)
 
     def record_response(self, label: str, body: Any, verbose: bool = False) -> None:
         """Record what came back. Bodies are kept only in verbose (debug) mode."""
@@ -210,7 +255,19 @@ class PdfParser:
 
 
 def select_pages(total: int, pages: list[int] | None) -> list[int]:
-    """Normalize a 1-based page selection against a document's page count."""
+    """Normalize a 1-based page selection against a document's page count.
+
+    A selection that matches nothing is a mistake worth stopping for: it used to
+    mean a remote parser posted an empty page list and paid for a request that
+    could only come back empty, or made no request at all and reported a
+    successful run of nothing.
+    """
     if not pages:
         return list(range(1, total + 1))
-    return [p for p in pages if 1 <= p <= total]
+    wanted = [p for p in pages if 1 <= p <= total]
+    if not wanted:
+        raise RuntimeError(
+            f"no such page: {sorted(set(pages))} requested, but the document has "
+            f"{total} page{'s' if total != 1 else ''}"
+        )
+    return wanted

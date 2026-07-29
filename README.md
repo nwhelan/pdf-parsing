@@ -472,6 +472,25 @@ how it was decided lives under `context`, so the two can't be confused:
 }
 ```
 
+### Failures that don't look like failures
+
+A remote call goes wrong in more ways than raising. These are all handled
+explicitly, because each one used to look like something else:
+
+| What happens | What you used to see | What you see now |
+|---|---|---|
+| Prompt hits a content filter | `IndexError: list index out of range` | "no choices — the prompt was rejected by a content filter" |
+| Answer cut off with no content | a page that parsed to nothing | "cut off before any content — raise max_output_tokens, or lower max_edge_px" |
+| Answer truncated but parseable | a short page, scored as a bad parser | the content, plus a warning that the page is incomplete |
+| Model replies in prose | `Expecting value: line 1 column 1` | "the model answered in prose rather than JSON — a refusal or a content filter", quoting it |
+| A proxy returns a 200 error page | `'list' object has no attribute 'get'` | "…answered with list, not an OCR response", quoting the body |
+| One malformed page in twenty | the whole run fails | that page is skipped with a warning; the rest parse |
+| A page selection that matches nothing | an empty request, billed | "no such page: [5] requested, but the document has 2 pages" — before the call |
+
+The silent ones matter most in a comparison: a parser that "succeeded" with no
+content scores like a bad parser rather than a misconfigured call, and the
+conclusion you draw is wrong.
+
 **`hints`** name configurations that will fail before the API refuses them,
 because a 404 rarely says which of several conventions was expected: an Azure
 OpenAI resource root used without an api-version, Mistral OCR pointed at an
@@ -487,9 +506,16 @@ Turn on a parser's **`debug`** option and the log also keeps the full prompt, th
 image data URL and the raw response body — the whole request as sent, for when
 the shape itself is in question. Off by default because the bodies are large.
 
-Credentials never reach the log: anything whose key looks like a secret is
-masked, and long values (a base64 PDF, an image) are truncated to their shape.
-The log is part of the stored result, so it's in the JSON tab too.
+Credentials never reach the log. Keys that look like secrets are masked, and so
+are credentials carried *inside* values — a key in a URL query parameter, basic
+auth in a host, a bearer token quoted in a message — since matching on key names
+alone would miss all three. Long values (a base64 PDF, an image) are truncated to
+their shape, and anything that isn't JSON-serializable becomes its repr, so a log
+entry can never fail the save of the result it belongs to.
+
+The log is part of the stored result, so it's in the JSON tab too. If caching a
+result fails — a full disk, say — the run is still returned with a warning
+rather than thrown away; the API call was already paid for.
 
 If the viewer says **"Could not load parsers: failed to fetch"**, the page
 reached the static bundle but not the API. It retries five times over about six

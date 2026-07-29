@@ -167,7 +167,13 @@ export default function App() {
         debug: result?.debug ?? [],
         detail: result?.warnings ?? [],
       }
-      setErrors((prev) => [entry, ...prev.filter((e) => e.parserId !== parserId)])
+      setErrors((prev) => [
+        entry,
+        // Re-running the same broken configuration shouldn't stack duplicates,
+        // but two *different* failures from one parser are two findings —
+        // comparing them is the reason the log exists. Match on the message.
+        ...prev.filter((e) => !(e.parserId === parserId && e.message === message)),
+      ].slice(0, 50))
       toast.error(`${parserId} failed`, {
         id: `run-${parserId}`,
         description: message.length > 140 ? `${message.slice(0, 140)}…` : message,

@@ -335,9 +335,29 @@ class MistralOCRParser(PdfParser):
         warnings: list[str] = list(hints)
         out_pages: list[PageResult] = []
         markdown_parts: list[str] = []
-        raw_pages = body.get("pages") or []
+
+        # A proxy, a WAF or a mis-set path answers 200 with something that is
+        # not an OCR response at all. `'list' object has no attribute 'get'`
+        # describes none of that; quote what actually came back.
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                f"{url} answered with {type(body).__name__}, not an OCR response: "
+                f"{json.dumps(body)[:300] if body is not None else 'null'}"
+            )
+
+        raw_pages = body.get("pages")
+        if raw_pages is None:
+            raise RuntimeError(
+                f"the response has no 'pages'. It contained {sorted(body)} — "
+                f"{json.dumps(body)[:300]}"
+            )
+        if not isinstance(raw_pages, list):
+            raise RuntimeError(f"'pages' came back as {type(raw_pages).__name__}, not a list")
 
         for position, raw in enumerate(raw_pages):
+            if not isinstance(raw, dict):
+                warnings.append(f"page entry {position} was {type(raw).__name__}, not an object")
+                continue
             index = raw.get("index")
             page_no = int(index) + 1 if isinstance(index, int) else (
                 wanted[position] if position < len(wanted) else position + 1

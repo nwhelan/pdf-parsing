@@ -11,6 +11,7 @@ browser.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -521,3 +522,133 @@ def test_hints_reach_the_debug_log_and_the_warnings(borderless, monkeypatch):
 def test_parameter_names_that_merely_contain_a_secret_word_survive(key):
     """A redactor that hides `token_param` is less useful without being safer."""
     assert redact({key: "max_completion_tokens"}) == {key: "max_completion_tokens"}
+
+
+# -- credentials that don't live under a telling key ------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://host/v1/ocr?api-version=1&api-key=sk-LEAKED",
+        "https://host/v1/ocr?subscription-key=sk-LEAKED",
+        "https://func.azurewebsites.net/api/x?code=sk-LEAKED",
+        "https://host/v1?access_token=sk-LEAKED",
+        "https://user:sk-LEAKED@host/v1/ocr",
+        "sent Authorization: Bearer sk-LEAKED",
+    ],
+)
+def test_a_credential_inside_a_value_is_masked_too(value):
+    """Gateways and Azure take keys in the URL; key-name matching alone misses them."""
+    assert "sk-LEAKED" not in str(redact({"url": value}))
+
+
+def test_scrubbing_leaves_the_parts_you_need_to_read():
+    url = "https://my-res.services.ai.azure.com/providers/mistral/azure/ocr?api-version=2026-01-01"
+    assert redact({"url": url})["url"] == url, "api-version is not a secret"
+
+
+# -- the log must never be able to break the result it belongs to -----------
+
+
+@pytest.mark.parametrize("value", [b"\xff\xfe", object(), {1, 2}, Exception("boom")])
+def test_anything_recorded_survives_json_serialization(value):
+    """A log entry that can't be serialized would fail the *save*, losing a paid-for run."""
+    json.dumps(redact({"body": value}))
+
+
+def test_an_unserializable_debug_entry_does_not_lose_the_result(workspace: Workspace, borderless):
+    from pdfplay.models import ParsedDocument
+
+    class Sloppy(PdfParser):
+        id = "sloppy"
+        name = "Sloppy"
+        description = "Records raw bytes."
+
+        def parse(self, pdf_path, pages, options):
+            self.record_request("POST", wire={"body": b"\xff\xfe raw bytes"})
+            return ParsedDocument(debug=self.debug_events)
+
+    registry.register(Sloppy)
+    try:
+        meta = workspace.add_document(borderless.path)
+        result, key, _ = run_parser(workspace, meta.doc_id, "sloppy")
+        assert result.status == "ok"
+        assert workspace.load_result(meta.doc_id, key) is not None, "it was cached, not lost"
+    finally:
+        registry._REGISTRY.pop("sloppy", None)
+
+
+def test_a_failure_to_cache_is_reported_but_does_not_destroy_the_run(
+    workspace: Workspace, borderless, monkeypatch
+):
+    """The API call was already paid for; a full disk must not throw the answer away."""
+
+    def no_room(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(type(workspace), "save_result", no_room)
+    meta = workspace.add_document(borderless.path)
+
+    result, _, _ = run_parser(workspace, meta.doc_id, "pymupdf")
+
+    assert result.status == "ok", "the run still succeeded"
+    assert result.pages, "and its output is intact"
+    assert any("could not be cached" in w for w in result.warnings)
+
+
+# -- a model that doesn't answer in JSON ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("I'm sorry, I can't help with that.", "prose rather than JSON"),
+        ('{"blocks": [{"text": "a"', "cut off"),
+        ("", "empty response"),
+    ],
+)
+def test_a_non_json_reply_is_explained_rather_than_thrown_raw(body, expected):
+    """`Expecting value: line 1 column 1` describes none of these."""
+    from pdfplay.parsers.vision_base import VisionParser
+
+    with pytest.raises(RuntimeError, match=expected):
+        VisionParser.loads(body)
+
+
+def test_the_explanation_quotes_what_came_back():
+    from pdfplay.parsers.vision_base import VisionParser
+
+    with pytest.raises(RuntimeError, match="cannot transcribe"):
+        VisionParser.loads("I cannot transcribe documents containing personal data.")
+
+
+def test_a_fenced_reply_still_parses():
+    from pdfplay.parsers.vision_base import VisionParser
+
+    assert VisionParser.loads('```json\n{"blocks": [], "markdown": "x"}\n```')["markdown"] == "x"
+
+
+# -- misconfigurations that produce an unhelpful 401 ------------------------
+
+
+def test_a_placeholder_key_going_somewhere_hosted_is_called_out():
+    cls = registry.get("openai-compatible")
+    settings = cls.settings(
+        cls.resolved_options({"base_url": "https://api.openai.com/v1", "model": "gpt-4.1"}), env={}
+    )
+    assert any("placeholder" in h for h in cls.endpoint_hints(settings))
+
+
+@pytest.mark.parametrize(
+    "base", ["http://localhost:11434/v1", "http://127.0.0.1:4000", "http://ollama.internal/v1"]
+)
+def test_a_local_server_without_a_key_is_left_alone(base):
+    cls = registry.get("openai-compatible")
+    settings = cls.settings(cls.resolved_options({"base_url": base, "model": "llava"}), env={})
+    assert cls.endpoint_hints(settings) == []
+
+
+def test_cost_survives_a_server_that_omits_usage():
+    """Plenty of OpenAI-compatible servers never send a usage block."""
+    assert registry.get("openai")().estimate_cost("gpt-4.1", None, None) == 0.0

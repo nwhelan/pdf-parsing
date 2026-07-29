@@ -54,7 +54,10 @@ def run_parser(
     if not availability.available:
         result.status = "error"
         result.error = f"parser unavailable: {availability.reason}"
-        workspace.save_result(result, key)
+        try:
+            workspace.save_result(result, key)
+        except Exception:  # pragma: no cover - nothing useful to cache anyway
+            pass
         return result, key, False
 
     parser = parser_cls()
@@ -77,7 +80,13 @@ def run_parser(
         result.debug = parser.debug_events
     result.duration_s = time.perf_counter() - started
 
-    workspace.save_result(result, key)
+    # Caching is a convenience; the result is the thing that was paid for. A
+    # full disk or an unserializable field must not turn a finished run into
+    # nothing — record why it wasn't cached and hand it back anyway.
+    try:
+        workspace.save_result(result, key)
+    except Exception as exc:
+        result.warnings.append(f"result could not be cached: {type(exc).__name__}: {exc}")
     return result, key, False
 
 

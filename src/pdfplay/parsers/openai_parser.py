@@ -225,6 +225,12 @@ class OpenAIVisionParser(VisionParser):
                 f"api_version is set, which selects the Azure client, but {host} is not an "
                 "Azure endpoint."
             )
+        if settings.get("api_key") == PLACEHOLDER_KEY and not _is_local(host):
+            hints.append(
+                f"No API key was found, so a placeholder is being sent to {host}. That reads as "
+                "an authentication failure rather than a missing key — set OPENAI_API_KEY or "
+                "name the variable in api_key_env."
+            )
         if host.endswith(".azure.com"):
             hints.append(
                 "On Azure the model field is the *deployment* name, which need not match the "
@@ -267,6 +273,42 @@ class OpenAIVisionParser(VisionParser):
         if choice == "json_object":
             return {"response_format": {"type": "json_object"}}
         return {}
+
+    def read_choice(self, response: Any) -> str:
+        """The reply text, or an error saying why there isn't one.
+
+        Both of these arrive looking like success. An empty `choices` list is
+        what Azure returns when the *prompt* trips a content filter, and a null
+        `content` is what you get when the answer was cut off or filtered —
+        which used to become `{}` and report a page with nothing on it.
+        """
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            reason = getattr(response, "prompt_filter_results", None)
+            raise RuntimeError(
+                "the response contained no choices, which usually means the prompt was "
+                f"rejected by a content filter{f' ({reason})' if reason else ''}"
+            )
+
+        choice = choices[0]
+        finish = getattr(choice, "finish_reason", None)
+        text = getattr(getattr(choice, "message", None), "content", None)
+
+        if not text:
+            explanation = {
+                "length": "the answer was cut off before any content — raise max_output_tokens, "
+                "or lower max_edge_px so the image costs fewer tokens",
+                "content_filter": "the answer was withheld by a content filter",
+            }.get(str(finish), f"finish_reason={finish!r}")
+            raise RuntimeError(f"the model returned no content: {explanation}")
+
+        if str(finish) == "length":
+            # It parsed, but the page is incomplete — and an incomplete page
+            # quietly scores like a bad parser rather than a short budget.
+            self.note_warning(
+                "the reply hit max_output_tokens and was truncated, so this page is incomplete"
+            )
+        return text
 
     # -- driver ----------------------------------------------------------
 
@@ -333,16 +375,33 @@ class OpenAIVisionParser(VisionParser):
             )
             response = client.chat.completions.create(**body)
 
-        self.record_response("chat.completions", response.model_dump(), verbose=verbose)
-        text = response.choices[0].message.content or "{}"
+        self.record_response("chat.completions", _dump(response), verbose=verbose)
+        text = self.read_choice(response)
+
+        raw_usage = getattr(response, "usage", None)
         usage = Usage(
-            input_tokens=getattr(response.usage, "prompt_tokens", None),
-            output_tokens=getattr(response.usage, "completion_tokens", None),
+            input_tokens=getattr(raw_usage, "prompt_tokens", None),
+            output_tokens=getattr(raw_usage, "completion_tokens", None),
             model=model,
             requests=1,
         )
         usage.cost_usd = self.estimate_cost(model, usage.input_tokens or 0, usage.output_tokens or 0)
         return self.loads(text), usage
+
+
+def _dump(response: Any) -> Any:
+    """`model_dump` where the SDK offers one; never fail the call over logging."""
+    try:
+        return response.model_dump()
+    except Exception:  # pragma: no cover - a stand-in client or an odd SDK
+        return {"repr": repr(response)[:600]}
+
+
+def _is_local(host: str) -> bool:
+    name = host.split(":")[0]
+    return name in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal") or name.endswith(
+        (".local", ".internal")
+    )
 
 
 def _rejected_token_param(exc: Exception, sent: str) -> bool:

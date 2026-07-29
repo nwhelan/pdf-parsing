@@ -52,6 +52,14 @@ KEY_ENV_CANDIDATES = (
 # Endpoint overrides, so a deployment URL doesn't have to live in the UI.
 URL_ENV_CANDIDATES = ("MISTRAL_OCR_URL", "AZURE_MISTRAL_ENDPOINT", "AZURE_AI_API_BASE")
 
+# Foundry exposes Mistral OCR under two conventions depending on how it was
+# deployed, and guessing the wrong one is a 404 that explains nothing:
+#   serverless (models-as-a-service)  <host>.models.ai.azure.com/v1/ocr
+#   an AI Services resource          <host>.services.ai.azure.com/providers/mistral/azure/ocr
+SERVERLESS_HOST = ".models.ai.azure.com"
+SERVERLESS_PATH = "/v1/ocr"
+AI_SERVICES_PATH = "/providers/mistral/azure/ocr"
+
 
 class MistralOCRParser(PdfParser):
     """Shared implementation; subclasses only set an id, a name and a model."""
@@ -169,10 +177,10 @@ class MistralOCRParser(PdfParser):
         endpoint = opts.get("endpoint") or "mistral"
         base = cls.configured_base(opts, env)
         if base:
-            # An explicit base_url is taken literally; an env var may be a bare
-            # Foundry resource root, which still needs the OCR path.
-            if (opts.get("base_url") or "").strip():
-                return cls._with_api_version(base, opts)
+            # A URL that already has a path is taken literally — it may point at
+            # a gateway with its own routing. A bare host is completed, whichever
+            # box it came from: posting a document to a hostname is never what
+            # was meant, and the resulting 404 explains nothing.
             return cls._with_api_version(cls._normalize_azure(base, endpoint), opts)
 
         if endpoint == "mistral":
@@ -194,11 +202,43 @@ class MistralOCRParser(PdfParser):
 
     @staticmethod
     def _normalize_azure(url: str, endpoint: str) -> str:
-        """Accept a bare Foundry resource root and complete the OCR path."""
+        """Complete the OCR path on a bare Foundry host.
+
+        Which path depends on how the model was deployed, so it follows the
+        hostname rather than assuming one convention.
+        """
         url = url.rstrip("/")
-        if endpoint != "azure" or "/ocr" in url:
+        host = url.split("//")[-1].split("/")[0].lower()
+        has_path = bool(url.split(host, 1)[-1].split("?")[0].strip("/"))
+        if endpoint != "azure" or has_path:
             return url
-        return f"{url}/providers/mistral/azure/ocr"
+        return f"{url}{SERVERLESS_PATH if host.endswith(SERVERLESS_HOST) else AI_SERVICES_PATH}"
+
+    @classmethod
+    def endpoint_hints(cls, url: str, opts: dict[str, Any], model: str) -> list[str]:
+        """Configuration that will fail, named before the API refuses it."""
+        hints: list[str] = []
+        host = url.split("//")[-1].split("/")[0].lower()
+        path = url.split(host, 1)[-1].split("?")[0]
+
+        if host.endswith(".openai.azure.com"):
+            hints.append(
+                f"{host} is an Azure OpenAI resource, which does not serve Mistral OCR. On "
+                f"Foundry the host is *{SERVERLESS_HOST} or *.services.ai.azure.com."
+            )
+        if not path.strip("/"):
+            hints.append(
+                f"The URL has no path, so this posts to the host root. Expected {SERVERLESS_PATH} "
+                f"or {AI_SERVICES_PATH} — endpoint=azure appends one; endpoint=custom does not."
+            )
+        if opts.get("endpoint") == "azure" and model.startswith("mistral-ocr"):
+            hints.append(
+                f"{model!r} is an api.mistral.ai model id. On Foundry this field is the "
+                "deployment name, usually mistral-document-ai-2505 or -2512."
+            )
+        if host.endswith(SERVERLESS_HOST) and not (opts.get("api_version") or "").strip():
+            hints.append("A serverless Foundry endpoint usually requires api_version to be set.")
+        return hints
 
     @staticmethod
     def _with_api_version(url: str, opts: dict[str, Any]) -> str:
@@ -277,12 +317,14 @@ class MistralOCRParser(PdfParser):
 
         # Recorded before the POST: a 400 about a missing annotation prompt or a
         # 404 on a deployment name is only diagnosable against what was sent.
+        # `wire` is the request and nothing else — an earlier version put the
+        # `endpoint` option alongside the payload, and it read as a body field.
+        hints = self.endpoint_hints(url, opts, model)
         self.record_request(
             "POST",
-            url=url,
-            headers=headers,
-            endpoint=opts.get("endpoint"),
-            payload=payload,
+            wire={"url": url, "headers": headers, "body": payload},
+            context={"endpoint_option": opts.get("endpoint"), "model": model},
+            hints=hints,
         )
 
         started = time.perf_counter()
@@ -290,7 +332,7 @@ class MistralOCRParser(PdfParser):
         elapsed = time.perf_counter() - started
         self.record_response("ocr", body, verbose=verbose)
 
-        warnings: list[str] = []
+        warnings: list[str] = list(hints)
         out_pages: list[PageResult] = []
         markdown_parts: list[str] = []
         raw_pages = body.get("pages") or []

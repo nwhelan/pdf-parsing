@@ -60,7 +60,30 @@ class Option:
 
 # Anything that looks like a credential, wherever it turns up in a header or a
 # request body. Debug output is written to disk and read in a browser.
-SECRET_HINTS = ("authorization", "api-key", "api_key", "key", "token", "secret", "password")
+#
+# Matched as whole names or as a suffix, not as a substring: `token_param` and
+# `max_completion_tokens` are parameter names worth reading, and a redactor that
+# hides them makes the log less useful without making it safer.
+SECRET_NAMES = frozenset(
+    {
+        "authorization",
+        "api_key",
+        "apikey",
+        "x_api_key",
+        "key",
+        "token",
+        "secret",
+        "password",
+        "credentials",
+        "bearer",
+    }
+)
+SECRET_SUFFIXES = ("_key", "_token", "_secret", "_password", "_credentials")
+
+
+def is_secret(key: str) -> bool:
+    name = key.lower().replace("-", "_")
+    return name in SECRET_NAMES or name.endswith(SECRET_SUFFIXES)
 # Long values are almost always a base64 document or an image; the shape is the
 # useful part, not the megabyte.
 MAX_DEBUG_VALUE = 600
@@ -68,7 +91,7 @@ MAX_DEBUG_VALUE = 600
 
 def redact(value: Any, key: str = "") -> Any:
     """Copy a request structure with secrets masked and bulk values truncated."""
-    if any(hint in key.lower() for hint in SECRET_HINTS) and isinstance(value, str) and value:
+    if is_secret(key) and isinstance(value, str) and value:
         return f"<{len(value)} chars redacted>"
     if isinstance(value, dict):
         return {k: redact(v, k) for k, v in value.items()}

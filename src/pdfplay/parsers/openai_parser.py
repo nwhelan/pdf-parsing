@@ -63,6 +63,16 @@ ENDPOINT_OPTIONS = (
         help="Lower this if a server rejects strict schemas. 'text' relies on the prompt alone.",
     ),
     Option(
+        "token_param",
+        "choice",
+        "auto",
+        choices=["auto", "max_tokens", "max_completion_tokens"],
+        help=(
+            "GPT-5 and the o-series need max_completion_tokens; older models need max_tokens. "
+            "'auto' picks by model id and retries with the other if the API objects."
+        ),
+    ),
+    Option(
         "debug",
         "bool",
         False,
@@ -83,6 +93,18 @@ ENDPOINT_OPTIONS = (
 # Servers behind a base_url are often local and unauthenticated, but the SDK
 # insists on a key being present.
 PLACEHOLDER_KEY = "not-needed"
+
+# GPT-5 and the reasoning series reject `max_tokens` outright and want
+# `max_completion_tokens`. Prefix matching only works when the model id is
+# visible — an Azure deployment can be called anything — so a rejection is also
+# retried with the other spelling.
+COMPLETION_TOKEN_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+WRONG_TOKEN_PARAM = "max_tokens"
+RIGHT_TOKEN_PARAM = "max_completion_tokens"
+
+# Azure OpenAI serves the OpenAI-shaped API under this path. Without it, the
+# plain client posts to the resource root and gets a 404 that says nothing.
+AZURE_OPENAI_V1_PATH = "/openai/v1"
 
 
 class OpenAIVisionParser(VisionParser):
@@ -172,6 +194,44 @@ class OpenAIVisionParser(VisionParser):
 
         return {"model": model, "base_url": base_url, "api_key": key, "api_version": str(version)}
 
+    @staticmethod
+    def token_param(model: str, choice: str = "auto") -> str:
+        """Which token limit this model will accept."""
+        if choice in (WRONG_TOKEN_PARAM, RIGHT_TOKEN_PARAM):
+            return choice
+        name = model.lower().replace("_", "-")
+        return RIGHT_TOKEN_PARAM if name.startswith(COMPLETION_TOKEN_PREFIXES) else WRONG_TOKEN_PARAM
+
+    @classmethod
+    def endpoint_hints(cls, settings: dict[str, Any]) -> list[str]:
+        """Configuration that will fail, named before the API refuses it.
+
+        A 404 from Azure says nothing about which of several conventions was
+        expected, so the likely mismatches are called out next to the request.
+        """
+        hints: list[str] = []
+        base_url = (settings.get("base_url") or "").rstrip("/")
+        host = base_url.split("//")[-1].split("/")[0].lower()
+
+        if host.endswith(".openai.azure.com") and not settings.get("api_version"):
+            if AZURE_OPENAI_V1_PATH not in base_url:
+                hints.append(
+                    f"{host} is an Azure OpenAI resource, and without api_version the plain "
+                    f"OpenAI client is used — that needs base_url to end in {AZURE_OPENAI_V1_PATH}. "
+                    "Either append it, or set api_version to use the Azure client instead."
+                )
+        if settings.get("api_version") and not host.endswith((".openai.azure.com", ".azure.com")):
+            hints.append(
+                f"api_version is set, which selects the Azure client, but {host} is not an "
+                "Azure endpoint."
+            )
+        if host.endswith(".azure.com"):
+            hints.append(
+                "On Azure the model field is the *deployment* name, which need not match the "
+                f"model id — check that {settings.get('model')!r} is what the deployment is called."
+            )
+        return hints
+
     @classmethod
     def build_client(cls, opts: dict[str, Any], env: dict[str, str] | None = None):
         from openai import AzureOpenAI, OpenAI
@@ -219,9 +279,11 @@ class OpenAIVisionParser(VisionParser):
         client = self.build_client(opts)
         data_url = "data:image/png;base64," + base64.standard_b64encode(png).decode("ascii")
         verbose = bool(opts.get("debug"))
-        request: dict[str, Any] = {
+
+        token_param = self.token_param(model, str(opts.get("token_param") or "auto"))
+        body: dict[str, Any] = {
             "model": model,
-            "max_tokens": int(opts["max_output_tokens"]),
+            token_param: int(opts["max_output_tokens"]),
             "messages": [
                 {
                     "role": "user",
@@ -234,25 +296,43 @@ class OpenAIVisionParser(VisionParser):
             **self.response_format(opts, self.build_schema(opts)),
         }
 
-        # Recorded before the call, so a failure still shows what was attempted:
-        # which client, which URL, which model, and the exact request shape.
+        # Recorded before the call, so a failure still shows what was attempted.
+        # `wire` is what goes to the API and nothing else; everything about how
+        # it was decided lives under `context`, so the two can't be confused.
         self.record_request(
             "chat.completions.create",
-            client=type(client).__name__,
-            model=model,
-            # The resolved setting rather than the client's attribute: it is
-            # what was asked for, and it survives a client that doesn't expose
-            # one. Blank means the SDK's own default (api.openai.com).
-            base_url=settings["base_url"],
-            client_base_url=str(getattr(client, "base_url", "")) or None,
-            api_version=settings["api_version"] or None,
-            model_source="config.yaml" if self.configured(opts) else "option",
-            image_bytes=len(png),
-            prompt_chars=len(prompt),
-            request=request if verbose else {**request, "messages": _shape(request["messages"])},
+            wire=body if verbose else {**body, "messages": _shape(body["messages"])},
+            context={
+                "client": type(client).__name__,
+                "model": model,
+                "base_url": settings["base_url"],
+                "client_base_url": str(getattr(client, "base_url", "")) or None,
+                "api_version": settings["api_version"] or None,
+                "model_source": "config.yaml" if self.configured(opts) else "option",
+                "token_param": token_param,
+                "image_bytes": len(png),
+                "prompt_chars": len(prompt),
+            },
+            hints=self.endpoint_hints(settings),
         )
 
-        response = client.chat.completions.create(**request)
+        try:
+            response = client.chat.completions.create(**body)
+        except Exception as exc:
+            # An Azure deployment can be named anything, so the model id is not
+            # always enough to know which spelling it wants. If that is what it
+            # objected to, send the other one rather than making it your problem.
+            other = RIGHT_TOKEN_PARAM if token_param == WRONG_TOKEN_PARAM else WRONG_TOKEN_PARAM
+            if not _rejected_token_param(exc, token_param):
+                raise
+            body[other] = body.pop(token_param)
+            self.record_request(
+                "chat.completions.create (retry)",
+                wire={"changed": f"{token_param} -> {other}"},
+                context={"reason": str(exc)[:300]},
+            )
+            response = client.chat.completions.create(**body)
+
         self.record_response("chat.completions", response.model_dump(), verbose=verbose)
         text = response.choices[0].message.content or "{}"
         usage = Usage(
@@ -263,6 +343,12 @@ class OpenAIVisionParser(VisionParser):
         )
         usage.cost_usd = self.estimate_cost(model, usage.input_tokens or 0, usage.output_tokens or 0)
         return self.loads(text), usage
+
+
+def _rejected_token_param(exc: Exception, sent: str) -> bool:
+    """Whether this error is the API objecting to the token-limit parameter."""
+    message = str(exc).lower()
+    return sent in message and ("unsupported" in message or "not supported" in message)
 
 
 def _shape(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
